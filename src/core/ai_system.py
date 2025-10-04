@@ -4,10 +4,14 @@ Main orchestrator that handles AI interactions, tool management, and task execut
 """
 
 import json
+import os
 import re
 import time
+import hashlib
 from collections import deque
 from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
+from datetime import datetime
 
 import requests
 
@@ -20,6 +24,9 @@ from src.logging.logger import logger
 from src.database.memory import MemoryManager, ToolManager, ExecutionHistory, Tool
 from src.tools.base_tools import BaseTools
 from src.tools.voice_tools import VoiceTools
+from src.core.context_manager import ContextManager
+from src.tools.google_search import GoogleSearchTool
+from src.core.gemini_client import GeminiClient
 
 
 class AISystem:
@@ -37,14 +44,20 @@ class AISystem:
         self.memory_manager = MemoryManager()
         self.tool_manager = ToolManager()
         self.execution_history = ExecutionHistory()
+        self.context_manager = ContextManager()
+        self.google_search = GoogleSearchTool()
+        self.gemini_client = GeminiClient()
+        
+        # Load system configuration
+        self.system_config = self._load_system_config()
         
         # Initialize tools
         self.base_tools = BaseTools(system=self)
         self.voice_tools = VoiceTools(system=self)
         
-        # System context
+        # System context - completely dynamic
         self.context = {
-            "cwd": str(settings.BASE_DIR),
+            "cwd": os.getcwd(),  # Start from actual current working directory
             "os": sys.platform,
             "python_version": sys.version,
             "system_info": {},
@@ -64,6 +77,132 @@ class AISystem:
         
         self.logger.success("AI System initialized successfully")
     
+    def _load_system_config(self) -> Dict[str, Any]:
+        """Load system configuration from system.json file."""
+        try:
+            system_file = Path(__file__).parent.parent.parent / "system.json"
+            if system_file.exists():
+                with open(system_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            else:
+                self.logger.warning("system.json not found, using default configuration")
+                return {}
+        except Exception as e:
+            self.logger.error(f"Failed to load system configuration: {e}")
+            return {}
+    
+    def _get_system_rules(self) -> str:
+        """Generate system rules from configuration."""
+        if not self.system_config:
+            return "- **NEVER** create files or directories in the project root directory\n- **NEVER** create files or directories in system directories\n- **When user doesn't specify a location**: Create files/directories in the `output/` folder for organization"
+        
+        system_dirs = self.system_config.get('system_directories', [])
+        protected_files = self.system_config.get('protected_files', [])
+        output_dir = self.system_config.get('output_directory', 'output/')
+        
+        rules = []
+        rules.append("- **NEVER** create files or directories in the project root directory (where main.py is located)")
+        
+        if system_dirs:
+            rules.append(f"- **NEVER** create files or directories in system directories: {', '.join(system_dirs)}")
+        
+        if protected_files:
+            rules.append(f"- **NEVER** modify protected files: {', '.join(protected_files)}")
+        
+        rules.append("- **When user specifies a location**: Use the exact path the user provides (absolute or relative)")
+        rules.append(f"- **When user doesn't specify a location**: Create files/directories in the `{output_dir}` folder for organization")
+        rules.append("- **Examples of proper usage**:")
+        rules.append(f"  - User says \"create file.txt\" → use `{output_dir}file.txt`")
+        rules.append("  - User says \"create /home/user/document.pdf\" → use `/home/user/document.pdf`")
+        rules.append(f"  - User says \"create data/analysis.json\" → use `{output_dir}data/analysis.json`")
+        rules.append(f"  - User says \"create in current directory\" → use `{output_dir}` (not project root)")
+        rules.append("- **Always ask for clarification** if the intended location is unclear")
+        rules.append("- This keeps the system organized and respects user intentions")
+        
+        return "\n".join(rules)
+    
+    def _create_project_tool(self, project_name: str, project_path: str) -> Dict[str, Any]:
+        """Tool wrapper for creating a project."""
+        try:
+            project_id = self.context_manager.create_project(project_name, project_path)
+            return {
+                "success": True,
+                "output": f"Created project '{project_name}' with ID: {project_id}"
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to create project: {e}"}
+    
+    def _set_active_project_tool(self, project_id: str) -> Dict[str, Any]:
+        """Tool wrapper for setting active project."""
+        try:
+            success = self.context_manager.set_active_project(project_id)
+            if success:
+                project = self.context_manager.get_active_project()
+                return {
+                    "success": True,
+                    "output": f"Activated project: {project.project_name} at {project.project_path}"
+                }
+            else:
+                return {"success": False, "error": "Project not found"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to set active project: {e}"}
+    
+    def _get_context_summary_tool(self) -> Dict[str, Any]:
+        """Tool wrapper for getting context summary."""
+        try:
+            summary = self.context_manager.get_context_summary()
+            return {"success": True, "output": summary}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to get context summary: {e}"}
+    
+    def _search_context_by_time_tool(self, start_time: float = None, end_time: float = None, entry_type: str = None) -> Dict[str, Any]:
+        """Tool wrapper for searching context by time range."""
+        try:
+            results = self.context_manager.search_context_by_time(start_time, end_time, entry_type)
+            if results:
+                formatted_results = []
+                for entry in results:
+                    timestamp = entry.get('timestamp', 0)
+                    time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'Unknown'
+                    formatted_results.append(f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}...")
+                return {"success": True, "output": f"Found {len(results)} entries:\n" + "\n".join(formatted_results)}
+            else:
+                return {"success": True, "output": "No entries found for the specified time range"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to search context by time: {e}"}
+    
+    def _get_context_by_date_tool(self, date_str: str) -> Dict[str, Any]:
+        """Tool wrapper for getting context by date."""
+        try:
+            results = self.context_manager.get_context_by_date(date_str)
+            if results:
+                formatted_results = []
+                for entry in results:
+                    timestamp = entry.get('timestamp', 0)
+                    time_str = datetime.fromtimestamp(timestamp).strftime('%H:%M:%S') if timestamp else 'Unknown'
+                    formatted_results.append(f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}...")
+                return {"success": True, "output": f"Found {len(results)} entries for {date_str}:\n" + "\n".join(formatted_results)}
+            else:
+                return {"success": True, "output": f"No entries found for date {date_str}"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to get context by date: {e}"}
+    
+    def _get_context_by_hour_tool(self, hour: int) -> Dict[str, Any]:
+        """Tool wrapper for getting context by hour."""
+        try:
+            results = self.context_manager.get_context_by_hour(hour)
+            if results:
+                formatted_results = []
+                for entry in results:
+                    timestamp = entry.get('timestamp', 0)
+                    time_str = datetime.fromtimestamp(timestamp).strftime('%H:%M:%S') if timestamp else 'Unknown'
+                    formatted_results.append(f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}...")
+                return {"success": True, "output": f"Found {len(results)} entries for hour {hour:02d}:00:\n" + "\n".join(formatted_results)}
+            else:
+                return {"success": True, "output": f"No entries found for hour {hour:02d}:00"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to get context by hour: {e}"}
+    
     def _register_core_tools(self):
         """Register core tools with the system."""
         self.logger.info("Registering core tools...")
@@ -75,13 +214,6 @@ class AISystem:
                 doc="Execute a shell command. Usage: run_shell(command)",
                 is_dynamic=False,
                 func=self.base_tools.run_shell
-            ),
-            Tool(
-                name="run_python",
-                code="",
-                doc="Execute Python code. Usage: run_python(code)",
-                is_dynamic=False,
-                func=self.base_tools.run_python
             ),
             Tool(
                 name="create_and_save_tool",
@@ -119,6 +251,13 @@ class AISystem:
                 func=self.base_tools.list_dir
             ),
             Tool(
+                name="change_dir",
+                code="",
+                doc="Change current working directory. Usage: change_dir(directory)",
+                is_dynamic=False,
+                func=self.base_tools.change_dir
+            ),
+            Tool(
                 name="complete_task",
                 code="",
                 doc="Mark task as complete. Usage: complete_task(message)",
@@ -131,6 +270,268 @@ class AISystem:
                 doc="Get system information. Usage: get_system_info()",
                 is_dynamic=False,
                 func=self.base_tools.get_system_info
+            ),
+            Tool(
+                name="google_search",
+                code="",
+                doc="Search the web using Google. Usage: google_search(query, num_results=10)",
+                is_dynamic=False,
+                func=self.google_search.search
+            ),
+            Tool(
+                name="google_search_news",
+                code="",
+                doc="Search for news articles. Usage: google_search_news(query, num_results=10)",
+                is_dynamic=False,
+                func=self.google_search.search_news
+            ),
+            Tool(
+                name="google_search_images",
+                code="",
+                doc="Search for images. Usage: google_search_images(query, num_results=10)",
+                is_dynamic=False,
+                func=self.google_search.search_images
+            ),
+            Tool(
+                name="create_project",
+                code="",
+                doc="Create a new project context. Usage: create_project(project_name, project_path)",
+                is_dynamic=False,
+                func=self._create_project_tool
+            ),
+            Tool(
+                name="set_active_project",
+                code="",
+                doc="Set active project. Usage: set_active_project(project_id)",
+                is_dynamic=False,
+                func=self._set_active_project_tool
+            ),
+            Tool(
+                name="get_context_summary",
+                code="",
+                doc="Get current context summary. Usage: get_context_summary()",
+                is_dynamic=False,
+                func=self._get_context_summary_tool
+            ),
+            Tool(
+                name="search_context_by_time",
+                code="",
+                doc="Search context entries by time range. Usage: search_context_by_time(start_time=None, end_time=None, entry_type=None)",
+                is_dynamic=False,
+                func=self._search_context_by_time_tool
+            ),
+            Tool(
+                name="get_context_by_date",
+                code="",
+                doc="Get context entries for a specific date. Usage: get_context_by_date(date_str) - format: YYYY-MM-DD",
+                is_dynamic=False,
+                func=self._get_context_by_date_tool
+            ),
+            Tool(
+                name="get_context_by_hour",
+                code="",
+                doc="Get context entries for a specific hour. Usage: get_context_by_hour(hour) - hour: 0-23",
+                is_dynamic=False,
+                func=self._get_context_by_hour_tool
+            ),
+            Tool(
+                name="analyze_image",
+                code="",
+                doc="Analyze an image using Gemini Vision. Usage: analyze_image(image_path, prompt='Describe this image')",
+                is_dynamic=False,
+                func=self.gemini_client.analyze_image
+            ),
+            Tool(
+                name="read_screen",
+                code="",
+                doc="Capture the current screen, analyze it with AI, and clean up the temporary image. Usage: read_screen(prompt='Describe what you see on this screen')",
+                is_dynamic=False,
+                func=self.base_tools.read_screen
+            ),
+            Tool(
+                name="generate_structured_output",
+                code="",
+                doc="Generate structured output using JSON schema. Usage: generate_structured_output(prompt, schema)",
+                is_dynamic=False,
+                func=self.gemini_client.generate_structured_output
+            ),
+            Tool(
+                name="create_session",
+                code="",
+                doc="Create a new conversation session. Usage: create_session(session_id=None)",
+                is_dynamic=False,
+                func=self.gemini_client.create_session
+            ),
+            # Enhanced file and directory tools
+            Tool(
+                name="search_in_file",
+                code="",
+                doc="Search for text in a file. Usage: search_in_file(file_path, search_term, case_sensitive=False)",
+                is_dynamic=False,
+                func=self.base_tools.search_in_file
+            ),
+            Tool(
+                name="replace_in_file",
+                code="",
+                doc="Replace text in a file. Usage: replace_in_file(file_path, old_text, new_text, case_sensitive=True)",
+                is_dynamic=False,
+                func=self.base_tools.replace_in_file
+            ),
+            Tool(
+                name="search_directory",
+                code="",
+                doc="Recursively search for text in all files within a directory. Usage: search_directory(directory, search_term, case_sensitive=False)",
+                is_dynamic=False,
+                func=self.base_tools.search_directory
+            ),
+            Tool(
+                name="find_files",
+                code="",
+                doc="Find files matching a glob pattern. Usage: find_files(pattern, directory='.')",
+                is_dynamic=False,
+                func=self.base_tools.find_files
+            ),
+            Tool(
+                name="create_archive",
+                code="",
+                doc="Create a zip or tar archive from a list of files. Usage: create_archive(archive_path, files, archive_type='zip')",
+                is_dynamic=False,
+                func=self.base_tools.create_archive
+            ),
+            Tool(
+                name="extract_archive",
+                code="",
+                doc="Extract a zip or tar archive. Usage: extract_archive(archive_path, extract_to=None)",
+                is_dynamic=False,
+                func=self.base_tools.extract_archive
+            ),
+            Tool(
+                name="read_json_file",
+                code="",
+                doc="Read and parse a JSON file. Usage: read_json_file(file_path)",
+                is_dynamic=False,
+                func=self.base_tools.read_json_file
+            ),
+            Tool(
+                name="write_json_file",
+                code="",
+                doc="Write data to a JSON file. Usage: write_json_file(file_path, data, indent=2)",
+                is_dynamic=False,
+                func=self.base_tools.write_json_file
+            ),
+            Tool(
+                name="read_csv_file",
+                code="",
+                doc="Read and parse a CSV file. Usage: read_csv_file(file_path, delimiter=',')",
+                is_dynamic=False,
+                func=self.base_tools.read_csv_file
+            ),
+            Tool(
+                name="write_csv_file",
+                code="",
+                doc="Write data to a CSV file. Usage: write_csv_file(file_path, data, headers=None, delimiter=',')",
+                is_dynamic=False,
+                func=self.base_tools.write_csv_file
+            ),
+            Tool(
+                name="run_linter",
+                code="",
+                doc="Run a Python linter (pylint) on a file or directory. Usage: run_linter(path)",
+                is_dynamic=False,
+                func=self.base_tools.run_linter
+            ),
+            Tool(
+                name="replace_in_multiple_files",
+                code="",
+                doc="Perform a search and replace operation across multiple files. Usage: replace_in_multiple_files(files, old_text, new_text, case_sensitive=True)",
+                is_dynamic=False,
+                func=self.base_tools.replace_in_multiple_files
+            ),
+            # Enhanced web search tools
+            Tool(
+                name="enhanced_web_search",
+                code="",
+                doc="Perform web search with adaptive result length based on query complexity. Usage: enhanced_web_search(query, adaptive=True)",
+                is_dynamic=False,
+                func=self.gemini_client.enhanced_web_search
+            ),
+            Tool(
+                name="analyze_urls",
+                code="",
+                doc="Analyze multiple URLs and extract information. Usage: analyze_urls(urls)",
+                is_dynamic=False,
+                func=self.gemini_client.analyze_urls
+            ),
+            # Additional file and system management tools
+            Tool(
+                name="get_file_info",
+                code="",
+                doc="Get detailed information about a file. Usage: get_file_info(file_path)",
+                is_dynamic=False,
+                func=self.base_tools.get_file_info
+            ),
+            Tool(
+                name="copy_file",
+                code="",
+                doc="Copy a file from source to destination. Usage: copy_file(source, destination)",
+                is_dynamic=False,
+                func=self.base_tools.copy_file
+            ),
+            Tool(
+                name="move_file",
+                code="",
+                doc="Move a file from source to destination. Usage: move_file(source, destination)",
+                is_dynamic=False,
+                func=self.base_tools.move_file
+            ),
+            Tool(
+                name="delete_file",
+                code="",
+                doc="Delete a file or directory. Usage: delete_file(file_path)",
+                is_dynamic=False,
+                func=self.base_tools.delete_file
+            ),
+            Tool(
+                name="create_directory",
+                code="",
+                doc="Create a directory. Usage: create_directory(directory_path)",
+                is_dynamic=False,
+                func=self.base_tools.create_directory
+            ),
+            Tool(
+                name="get_directory_size",
+                code="",
+                doc="Get the total size of a directory. Usage: get_directory_size(directory_path)",
+                is_dynamic=False,
+                func=self.base_tools.get_directory_size
+            ),
+            Tool(
+                name="find_large_files",
+                code="",
+                doc="Find files larger than specified size in MB. Usage: find_large_files(directory, min_size_mb=10.0)",
+                is_dynamic=False,
+                func=self.base_tools.find_large_files
+            ),
+            Tool(
+                name="get_system_disk_usage",
+                code="",
+                doc="Get disk usage information for all mounted drives. Usage: get_system_disk_usage()",
+                is_dynamic=False,
+                func=self.base_tools.get_system_disk_usage
+            ),
+            Tool(
+                name="get_process_info",
+                code="",
+                doc="Get information about running processes. Usage: get_process_info()",
+                is_dynamic=False,
+                func=self.base_tools.get_process_info
+            ),
+            Tool(
+                name="navigate_to_user_directories",
+                code="",
+                doc="Navigate to common user directories (Pictures, Desktop, etc.) based on OS. Usage: navigate_to_user_directories()",
+                is_dynamic=False,
+                func=self.base_tools.navigate_to_user_directories
             )
         ]
         
@@ -205,59 +606,38 @@ class AISystem:
             self.context["system_info"] = {"error": "Failed to gather system info"}
     
     def _gemini_request(self, prompt: str) -> Optional[str]:
-        """Make a request to the Gemini API."""
-        api_key = settings.get_api_key(self.context.get("api_key_in_use") == "secondary")
-        
-        if not api_key:
-            self.logger.error("No API key available")
-            return None
-        
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
-        }
-        params = {'key': api_key}
-        
-        for i in range(settings.MAX_RETRIES):
-            try:
-                response = requests.post(
-                    settings.GEMINI_API_URL, 
-                    headers=headers, 
-                    json=payload, 
-                    params=params, 
-                    timeout=60
+        """Make a request to the Gemini API using the enhanced client."""
+        try:
+            # Add context to prompt
+            context_summary = self.context_manager.get_context_summary()
+            enhanced_prompt = f"""
+{context_summary}
+
+Current Request:
+{prompt}
+"""
+            
+            # Use Gemini client with context caching
+            response = self.gemini_client.generate_with_context_caching(
+                enhanced_prompt, 
+                "main_conversation"
+            )
+            
+            if response.get("success"):
+                # Add context entry
+                self.context_manager.add_context_entry(
+                    "ai_response", 
+                    response["text"], 
+                    {"usage": response.get("usage", {})}
                 )
-                
-                # Handle API key switching
-                if response.status_code == 403 and self.context.get("api_key_in_use") == "primary":
-                    if settings.GEMINI_API_KEY_SECONDARY:
-                        self.logger.warning("Primary API key failed, switching to secondary")
-                        self.context["api_key_in_use"] = "secondary"
-                        continue
-                    else:
-                        self.logger.error("Primary API key failed and no secondary key available")
-                        return None
-                elif response.status_code == 403 and self.context.get("api_key_in_use") == "secondary":
-                    self.logger.error("Both API keys failed")
-                    return None
-                
-                response.raise_for_status()
-                response_data = response.json()
-                
-                if 'candidates' in response_data and response_data['candidates']:
-                    return response_data['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    self.logger.error("Gemini API returned empty response")
-                    return None
-                    
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Request failed: {e}. Retrying in {2**i} seconds...", exc_info=True)
-                time.sleep(2**i)
-            except (json.JSONDecodeError, KeyError) as e:
-                self.logger.error(f"Failed to parse Gemini response: {e}", exc_info=True)
+                return response["text"]
+            else:
+                self.logger.error(f"Gemini request failed: {response.get('error')}")
                 return None
-        
-        return None
+                
+        except Exception as e:
+            self.logger.error(f"Gemini request error: {e}", exc_info=True)
+            return None
     
     def _construct_prompt(self) -> str:
         """Construct the prompt for the AI model."""
@@ -266,10 +646,40 @@ class AISystem:
             for tool in self.tool_manager.tools.values()
         ])
         
-        # Build context string
+        # Build context string from context manager (actual context)
         context_string = ""
-        for item in self.context["conversation_history"]:
-            context_string += f"User: {item['user']}\nAI: {item['ai']}\n"
+        if self.context_manager.current_project:
+            # Get recent context entries from actual_context
+            recent_context = self.context_manager.get_recent_context(20)  # Last 20 entries
+            if recent_context:
+                context_string += "**Recent Context (Last 20 entries):**\n"
+                for entry in recent_context:
+                    entry_type = entry.get('entry_type', 'unknown')
+                    content = entry.get('content', '')
+                    timestamp = entry.get('timestamp', 0)
+                    if timestamp:
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                        time_short = dt.strftime('%H:%M:%S')
+                    else:
+                        time_str = 'Unknown'
+                        time_short = 'Unknown'
+                    
+                    if entry_type == 'user_request':
+                        context_string += f"[{time_str}] User: {content}\n"
+                    elif entry_type == 'ai_response':
+                        context_string += f"[{time_str}] AI: {content}\n"
+                    elif entry_type == 'tool_execution':
+                        context_string += f"[{time_str}] Tool: {content}\n"
+                    elif entry_type == 'error':
+                        context_string += f"[{time_str}] Error: {content}\n"
+                    else:
+                        context_string += f"[{time_str}] {entry_type}: {content}\n"
+                context_string += "\n"
+            
+            # Add context summary if available
+            if self.context_manager.current_project.context_summary:
+                context_string += f"**Context Summary:**\n{self.context_manager.current_project.context_summary}\n\n"
         
         # Add relevant memories
         if self.context.get("initial_goal"):
@@ -277,11 +687,43 @@ class AISystem:
             for item in relevant_memories:
                 context_string += f"- Memory: {item.content}\n"
         
-        # Add execution history
+        # Add execution history with detailed context
         execution_history_string = "\n".join([
-            f"- Step: {item['step']}\n  Result: {item['result']}\n" 
+            f"- Step: {item.get('step', 'Unknown')}\n  Action: {item.get('action', 'Unknown')}\n  Success: {item.get('success', False)}\n  Output: {(item.get('output', '') or '')[:200]}...\n  Error: {item.get('error', 'None') or 'None'}\n" 
             for item in self.context["execution_history"]
         ])
+        
+        # Add last result context
+        last_result_context = ""
+        if "last_result" in self.context:
+            last_result = self.context["last_result"]
+            full_result = last_result.get('full_result', {})
+            
+            # Show additional result fields if available
+            additional_info = ""
+            if full_result:
+                for key, value in full_result.items():
+                    if key not in ["success", "error", "output"] and value:
+                        additional_info += f"- {key}: {str(value)[:100]}{'...' if len(str(value)) > 100 else ''}\n"
+            
+            last_result_context = f"""
+**Last Tool Execution:**
+- Action: {last_result.get('action', 'Unknown')}
+- Success: {last_result.get('success', False)}
+- Output: {last_result.get('output', '') or 'None'}
+- Error: {last_result.get('error', 'None') or 'None'}
+{additional_info}"""
+        
+        # Add last error context
+        last_error_context = ""
+        if "last_error" in self.context:
+            last_error = self.context["last_error"]
+            last_error_context = f"""
+**Last Error:**
+- Action: {last_error.get('action', 'Unknown')}
+- Error: {last_error.get('error', 'Unknown') or 'None'}
+- Args: {last_error.get('args', {})}
+"""
         
         system_info = json.dumps(self.context["system_info"], indent=2)
         initial_goal_text = f"The user's original goal was: {self.context['initial_goal']}\n" if self.context.get("initial_goal") else ""
@@ -297,15 +739,72 @@ Your core process is as follows:
 5. **Reflect & Improve**: Analyze the output of each tool. If an error occurs, self-heal by creating a new plan to diagnose and fix the issue.
 
 **Your Guiding Principles:**
-- You have the power to create new tools using `create_and_save_tool`.
-- After creating a new tool, your **NEXT** step MUST be to use `run_python` with a test case to **verify** the new tool's functionality.
-- Use `run_shell` to execute system commands.
-- Use `run_python` to execute Python code.
-- Use `install_package` to install any necessary libraries.
-- Use `read_file` and `write_file` to interact with the file system.
-- Use `list_dir` to explore the file system.
-- When the entire task is complete, you MUST use the `complete_task` tool with a summary message.
-- **CRITICAL**: Do not repeat a failed step. If a step fails, your next plan must be to diagnose the failure and propose a new approach.
+- Be completely dynamic and adaptive - never assume specific paths, directories, or file locations exist
+- Explore and discover everything dynamically by starting from the current directory
+- Use `run_shell` to execute system commands (with proper quoting for file paths with spaces)
+- Use `read_file` and `write_file` to interact with the file system
+- Use `list_dir` to explore the file system and discover what actually exists
+- Use `change_dir` to navigate to directories you discover
+- Use `find_files` to search for files by pattern (e.g., "*.png", "*.jpg")
+- Use `analyze_image` to analyze any image file you discover
+- Use `read_screen` to capture and analyze the current screen
+- Use `search_directory` to search for text content across multiple files
+- Use `enhanced_web_search` for comprehensive web searches
+- When the entire task is complete, you MUST use the `complete_task` tool with a summary message
+- **CRITICAL**: Do not repeat a failed step. If a step fails, your next plan must be to diagnose the failure and propose a new approach
+- **DYNAMIC**: Never hardcode paths - always explore and discover what exists
+- **ADAPTIVE**: Work with whatever you find, don't assume anything exists
+- **EXPLORATION**: Start from current directory and systematically explore to find what you need
+- **NAVIGATION**: When you find a directory you need to explore, use `change_dir` to navigate to it, then use `list_dir` to see its contents
+
+**File and Directory Creation Rules:**
+{self._get_system_rules()}
+
+**Cross-Platform Directory Navigation Strategy:**
+ALWAYS start your exploration from the OS root directories and work your way down:
+
+**Windows:**
+- Start from: `C:\\Users\\` then navigate to `[username]\\Pictures\\Screenshots`
+- Alternative paths: `C:\\Users\\[username]\\Desktop\\Screenshots`
+- Use: `change_dir("C:\\Users")` → `list_dir(".")` → `change_dir("[username]")` → `change_dir("Pictures")` → `change_dir("Screenshots")`
+
+**Linux:**
+- Start from: `/home/` then navigate to `[username]/Pictures/Screenshots`
+- Alternative paths: `/home/[username]/Desktop/screenshots`
+- Use: `change_dir("/home")` → `list_dir(".")` → `change_dir("[username]")` → `change_dir("Pictures")` → `change_dir("Screenshots")`
+
+**macOS:**
+- Start from: `/Users/` then navigate to `[username]/Pictures/Screenshots`
+- Alternative paths: `/Users/[username]/Desktop/Screenshots`
+- Use: `change_dir("/Users")` → `list_dir(".")` → `change_dir("[username]")` → `change_dir("Pictures")` → `change_dir("Screenshots")`
+
+**Navigation Rules:**
+1. ALWAYS start from the OS root directory (C:\\Users, /home, /Users)
+2. Use `navigate_to_user_directories` to automatically find and navigate to common user directories
+3. Use `list_dir` to see what's available at each level
+4. Navigate step by step: root → username → Pictures → Screenshots
+5. If a directory doesn't exist, try alternative paths
+6. Use `find_files` with patterns like "*.png", "*.jpg" to locate images
+
+**Quick Start for Image/Screenshot Tasks:**
+1. Use `navigate_to_user_directories` to automatically find Pictures/Screenshots directories
+2. Use `list_dir` to see what's in the current directory
+3. Use `find_files` with "*.png" or "*.jpg" to find image files
+4. Use `analyze_image` to analyze any found images or `read_screen` to capture and analyze current screen
+
+**Key Navigation Strategy:**
+1. First, use `list_dir` to see what's in the current directory
+2. If you see a directory you need to explore (like "screenshots", "Pictures", "Desktop"), use `change_dir` to navigate to it
+3. Then use `list_dir` again to see what's inside that directory
+4. Use `find_files` with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif" to find image files
+5. Use `analyze_image` to analyze any image you find or `read_screen` to capture and analyze current screen
+6. If you need to find specific content, use `search_directory` to search across multiple files
+
+**Dynamic Discovery Examples:**
+- For screenshots: Look in Desktop, Pictures, Downloads, or any folder with "screenshot" in the name
+- For images: Use `find_files` with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.webp"
+- For documents: Look in Documents, Desktop, or use `find_files` with "*.pdf", "*.doc", "*.txt"
+- For code: Look for folders with "src", "code", "project" in the name, or use `find_files` with "*.py", "*.js", "*.html"
 
 **Available Tools:**
 {tool_descriptions}
@@ -319,9 +818,20 @@ Your core process is as follows:
 **Execution History (to prevent repeated failures):**
 {execution_history_string}
 
+{last_result_context}
+
+{last_error_context}
+
 {initial_goal_text}
 Current Status:
 {self.context.get('status', 'No specific status. Ready for a new task or step.')}
+
+**IMPORTANT CONTEXT AWARENESS:**
+- Always check the "Last Tool Execution" section to see what the previous step did
+- If the last step was successful, use its output to inform your next action
+- If the last step failed, analyze the error and create a plan to fix it
+- Never repeat the same failed step - always try a different approach
+- Use the execution history to understand what has been tried before
 
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{
@@ -344,6 +854,9 @@ Always return a valid JSON object.
         self.context["initial_goal"] = user_input
         self.context["status"] = f"Initial user request: {user_input}"
         self.context["conversation_history"].append({"user": user_input, "ai": ""})
+        
+        # Add to context manager
+        self.context_manager.add_context_entry("user_request", user_input)
         
         # Reset execution history for new task
         self.context["execution_history"].clear()
@@ -393,7 +906,7 @@ Always return a valid JSON object.
             return None
     
     def _execute_plan(self, plan_data: Dict[str, Any]) -> bool:
-        """Execute a plan step."""
+        """Execute a plan step with enhanced context management."""
         plan = plan_data.get("plan")
         if not isinstance(plan, list) or not plan:
             self.logger.error("Invalid plan structure")
@@ -405,11 +918,14 @@ Always return a valid JSON object.
         comment = plan_data.get("comment", "No comment provided")
         
         self.logger.step(1, 1, comment)
-        self.memory_manager.remember(f"Generated plan: {comment}", {
-            "type": "plan", 
-            "action": action, 
-            "args": args
-        })
+        
+        # Store plan in context
+        self.context["last_plan"] = {
+            "action": action,
+            "args": args,
+            "comment": comment,
+            "timestamp": time.time()
+        }
         
         # Check for repeated failed steps
         step_identifier = json.dumps(step_data, sort_keys=True)
@@ -430,26 +946,119 @@ Always return a valid JSON object.
         
         try:
             self.tool_manager.update_tool_usage(action)
-            self.logger.info(f"Executing tool: {action} with args: {args}")
+            self.logger.info(f"🔧 Executing tool: {action}")
+            self.logger.info(f"📋 Arguments: {json.dumps(args, indent=2)}")
+            print(f"\n🔧 Tool Call: {action}")
+            print(f"📋 Arguments: {json.dumps(args, indent=2)}")
+            print("─" * 50)
             
             result = tool.func(**args)
             
-            if result.get("output") == "TASK_COMPLETED_SIGNAL":
+            print("─" * 50)
+            if result.get("success"):
+                print(f"✅ Tool '{action}' completed successfully")
+            else:
+                print(f"❌ Tool '{action}' failed: {result.get('error', 'Unknown error')}")
+            print()
+            
+            # Dynamically extract all meaningful content from result
+            # Look for common output field names in order of preference
+            output_fields = ["output", "text", "result", "content", "data", "message", "response"]
+            output_text = ""
+            for field in output_fields:
+                if field in result and result[field]:
+                    output_text = str(result[field])
+                    break
+            
+            # If no standard output field found, look for any string value
+            if not output_text:
+                for key, value in result.items():
+                    if isinstance(value, str) and value.strip() and key not in ["success", "error"]:
+                        output_text = value
+                        break
+            
+            # If still no output, try to convert the entire result to string
+            if not output_text and result:
+                # Exclude non-essential fields from the string representation
+                filtered_result = {k: v for k, v in result.items() 
+                                 if k not in ["success", "error", "timestamp", "usage", "usage_metadata"]}
+                if filtered_result:
+                    output_text = str(filtered_result)
+            
+            # Store detailed result in context with full result data
+            self.context["last_result"] = {
+                "action": action,
+                "args": args,
+                "success": result.get("success", False),
+                "output": output_text,
+                "error": result.get("error", ""),
+                "full_result": result,  # Store the complete result for reference
+                "timestamp": time.time()
+            }
+            
+            # Add tool execution to context manager
+            tool_execution_content = f"Executed '{action}' with args: {json.dumps(args, indent=2)}"
+            if result.get("success"):
+                tool_execution_content += f"\nResult: {output_text[:500]}{'...' if len(output_text) > 500 else ''}"
+            else:
+                tool_execution_content += f"\nError: {result.get('error', 'Unknown error')}"
+            
+            self.context_manager.add_context_entry(
+                "tool_execution", 
+                tool_execution_content,
+                {"action": action, "args": args, "success": result.get("success", False)}
+            )
+            
+            # Add to execution history in context
+            execution_entry = {
+                "step": comment,
+                "action": action,
+                "args": args,
+                "success": result.get("success", False),
+                "output": output_text,
+                "error": result.get("error", ""),
+                "full_result": result,  # Store the complete result for reference
+                "timestamp": time.time()
+            }
+            self.context["execution_history"].append(execution_entry)
+            
+            if output_text == "TASK_COMPLETED_SIGNAL":
                 self.logger.success("Task completed successfully!")
                 self.context["status"] = "Task completed successfully."
                 return True
             
             if result.get("success"):
-                self.logger.success(f"Step completed. Output:\n{result.get('output')}")
+                self.logger.success(f"Step completed. Output:\n{output_text}")
                 self.memory_manager.remember(
-                    f"Executed '{action}' successfully. Output: {result.get('output')}", 
+                    f"Executed '{action}' successfully. Output: {output_text}", 
                     {"type": "tool_output", "tool": action}
                 )
-                self.context["status"] = f"Previous step '{comment}' completed successfully. What's next?"
+                self.context["status"] = f"Previous step '{comment}' completed successfully. Output: {output_text[:100]}..."
                 self.execution_history.log_execution(step_identifier, comment, "success")
             else:
                 error_msg = result.get('error')
                 self.logger.error(f"Step failed. Error:\n{error_msg}")
+                
+                # Store error in context for better error resolution
+                self.context["last_error"] = {
+                    "action": action,
+                    "args": args,
+                    "error": error_msg,
+                    "timestamp": time.time()
+                }
+                
+                # Add error to context manager
+                error_content = f"Tool '{action}' failed with args: {json.dumps(args, indent=2)}\nError: {error_msg}"
+                self.context_manager.add_context_entry(
+                    "error", 
+                    error_content,
+                    {"action": action, "args": args, "error": error_msg}
+                )
+                
+                # Attempt smart error resolution
+                if self._attempt_error_resolution(action, args, error_msg, step_identifier, comment):
+                    return True
+                
                 self.memory_manager.remember(
                     f"Execution of '{action}' failed: {error_msg}", 
                     {"type": "tool_error", "tool": action}
@@ -462,6 +1071,15 @@ Always return a valid JSON object.
         except Exception as e:
             error_msg = f"Unexpected error during execution: {e}"
             self.logger.error(error_msg, exc_info=True)
+            
+            # Store exception in context
+            self.context["last_error"] = {
+                "action": action,
+                "args": args,
+                "error": error_msg,
+                "timestamp": time.time()
+            }
+            
             self.memory_manager.remember(f"Unexpected error with '{action}': {e}", {"type": "tool_error"})
             self.context["status"] = f"Unexpected error during execution: {e}. Please diagnose and fix this issue."
             self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
@@ -504,5 +1122,256 @@ Always return a valid JSON object.
         self.memory_manager.close()
         self.tool_manager.close()
         self.execution_history.close()
+        self.context_manager.cleanup_old_projects()
         self.active = False
         self.logger.success("AI system shutdown complete")
+    
+    def _attempt_error_resolution(self, tool_name: str, args: Dict[str, Any], error_msg: str, step_identifier: str, comment: str) -> bool:
+        """Attempt to automatically resolve common errors with enhanced context awareness."""
+        self.logger.info(f"🔧 Attempting error resolution for: {error_msg}")
+        
+        # Check if we have context from previous successful steps
+        last_successful_result = None
+        for entry in reversed(self.context["execution_history"]):
+            if entry.get("success", False):
+                last_successful_result = entry
+                break
+        
+        # Directory navigation errors - use context from previous successful list_dir
+        if "Directory not found" in error_msg and tool_name == "change_dir":
+            if last_successful_result and last_successful_result.get("action") == "list_dir":
+                # Extract directory contents from previous successful list_dir
+                output = last_successful_result.get("output", "")
+                if output:
+                    files = output.split("\n")
+                    # Look for directories that might match what we're trying to access
+                    target_dir = args.get("directory", "")
+                    for file in files:
+                        if file.strip() and target_dir.lower() in file.lower():
+                            # Found a matching directory, try to navigate to it
+                            full_path = file.strip()
+                            self.logger.info(f"🔧 Context-based resolution: Found matching directory {full_path}")
+                            
+                            # Try to navigate to the full path
+                            change_result = self.base_tools.change_dir(full_path)
+                            if change_result.get("success"):
+                                self.logger.success(f"✅ Context-based error resolved! Navigated to: {full_path}")
+                                self.memory_manager.remember(f"Context-based directory resolution: {target_dir} -> {full_path}", {"type": "context_resolution"})
+                                self.context["status"] = f"Navigated to {full_path} using context from previous step"
+                                return True
+        
+        # File not found errors
+        if "No such file or directory" in error_msg or "File not found" in error_msg:
+            if tool_name == "analyze_image" and "image_path" in args:
+                # Try to find the correct file path
+                image_path = args["image_path"]
+                directory = os.path.dirname(image_path)
+                
+                # List directory to find similar files
+                list_result = self.base_tools.list_dir(directory)
+                if list_result.get("success"):
+                    files = list_result["output"].split("\n")
+                    # Find files with similar names
+                    similar_files = [f for f in files if os.path.splitext(f)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff']]
+                    
+                    if similar_files:
+                        # Use the first similar file found
+                        correct_path = os.path.join(directory, similar_files[0])
+                        self.logger.info(f"🔧 Found similar file: {correct_path}")
+                        
+                        # Retry with correct path
+                        new_args = args.copy()
+                        new_args["image_path"] = correct_path
+                        tool = self.tool_manager.get_tool(tool_name)
+                        if tool:
+                            result = tool.func(**new_args)
+                            if result.get("success"):
+                                self.logger.success(f"✅ Error resolved! Using file: {correct_path}")
+                                self.memory_manager.remember(f"Auto-resolved file path error: {image_path} -> {correct_path}", {"type": "error_resolution"})
+                                self.context["status"] = f"Step completed after error resolution"
+                                self.execution_history.log_execution(step_identifier, comment, "success", result.get("output", ""))
+                                return True
+        
+        # Smart navigation using context from previous successful list_dir
+        elif "Directory not found" in error_msg and tool_name == "change_dir":
+            if last_successful_result and last_successful_result.get("action") == "list_dir":
+                output = last_successful_result.get("output", "")
+                if output:
+                    files = output.split("\n")
+                    target_dir = args.get("directory", "").lower()
+                    
+                    # Look for exact matches first
+                    for file in files:
+                        if file.strip() and file.strip().lower() == target_dir:
+                            full_path = file.strip()
+                            self.logger.info(f"🔧 Exact match found: {full_path}")
+                            change_result = self.base_tools.change_dir(full_path)
+                            if change_result.get("success"):
+                                self.logger.success(f"✅ Navigated to exact match: {full_path}")
+                                self.context["status"] = f"Navigated to {full_path}"
+                                return True
+                    
+                    # Look for partial matches
+                    for file in files:
+                        if file.strip() and target_dir in file.strip().lower():
+                            full_path = file.strip()
+                            self.logger.info(f"🔧 Partial match found: {full_path}")
+                            change_result = self.base_tools.change_dir(full_path)
+                            if change_result.get("success"):
+                                self.logger.success(f"✅ Navigated to partial match: {full_path}")
+                                self.context["status"] = f"Navigated to {full_path}"
+                                return True
+        
+        # Cross-platform directory discovery for images/screenshots
+        elif any(keyword in comment.lower() for keyword in ["image", "picture", "screenshot", "photo"]):
+            if tool_name == "list_dir" and "directory" in args:
+                directory = args["directory"]
+                
+                # Cross-platform common directories to try
+                common_dirs = [
+                    os.path.expanduser("~"),  # Home directory
+                    os.path.join(os.path.expanduser("~"), "Desktop"),
+                    os.path.join(os.path.expanduser("~"), "Pictures"),
+                    os.path.join(os.path.expanduser("~"), "Downloads"),
+                    os.path.join(os.path.expanduser("~"), "Documents"),
+                    ".",  # Current directory
+                    ".."  # Parent directory
+                ]
+                
+                # Add platform-specific directories
+                if sys.platform == "win32":
+                    common_dirs.extend([
+                        os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots"),
+                        os.path.join(os.path.expanduser("~"), "Desktop", "Screenshots")
+                    ])
+                elif sys.platform == "darwin":  # macOS
+                    common_dirs.extend([
+                        os.path.join(os.path.expanduser("~"), "Desktop", "Screenshots"),
+                        os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots")
+                    ])
+                else:  # Linux
+                    common_dirs.extend([
+                        os.path.join(os.path.expanduser("~"), "Desktop", "screenshots"),
+                        os.path.join(os.path.expanduser("~"), "Pictures", "screenshots")
+                    ])
+                
+                # Try each directory
+                for test_dir in common_dirs:
+                    if os.path.exists(test_dir):
+                        self.logger.info(f"🔧 Exploring directory: {test_dir}")
+                        list_result = self.base_tools.list_dir(test_dir)
+                        if list_result.get("success"):
+                            files = list_result["output"].split("\n")
+                            image_files = [f for f in files if os.path.splitext(f)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff']]
+                            
+                            if image_files:
+                                # Select first image and analyze it
+                                selected_image = os.path.join(test_dir, image_files[0])
+                                self.logger.info(f"🔧 Cross-platform discovery: Found image {selected_image}")
+                                
+                                # Use analyze_image tool
+                                analyze_tool = self.tool_manager.get_tool("analyze_image")
+                                if analyze_tool:
+                                    result = analyze_tool.func(image_path=selected_image, prompt="Describe this image in detail")
+                                    if result.get("success"):
+                                        self.logger.success(f"✅ Cross-platform image analysis completed!")
+                                        self.memory_manager.remember(f"Cross-platform image analysis: {selected_image}", {"type": "cross_platform_analysis"})
+                                        self.context["status"] = f"Cross-platform image analysis completed"
+                                        self.execution_history.log_execution(step_identifier, comment, "success", result.get("output", ""))
+                                        return True
+                                
+                                # Also try to navigate to the directory for further exploration
+                                change_result = self.base_tools.change_dir(test_dir)
+                                if change_result.get("success"):
+                                    self.logger.info(f"🔧 Navigated to directory: {test_dir}")
+                                    self.context["status"] = f"Navigated to {test_dir} for further exploration"
+                                    return True
+        
+        # Dynamic content discovery - no assumptions about what exists
+        elif any(keyword in comment.lower() for keyword in ["file", "document", "code", "project"]):
+            if tool_name == "list_dir" and "directory" in args:
+                directory = args["directory"]
+                # Dynamically explore and find relevant content
+                list_result = self.base_tools.list_dir(directory)
+                if list_result.get("success"):
+                    files = list_result["output"].split("\n")
+                    
+                    # Look for any directories or files that might be relevant
+                    potential_targets = []
+                    for f in files:
+                        if f.strip():  # Skip empty lines
+                            potential_targets.append(f)
+                    
+                    # Try to find and process any relevant content
+                    for target in potential_targets:
+                        full_path = os.path.join(directory, target)
+                        
+                        # Check if it's a directory
+                        dir_result = self.base_tools.list_dir(full_path)
+                        if dir_result.get("success"):
+                            # It's a directory, explore it
+                            sub_files = dir_result["output"].split("\n")
+                            for sub_file in sub_files:
+                                if sub_file.strip():
+                                    sub_path = os.path.join(full_path, sub_file)
+                                    # Check if it's an image file
+                                    if os.path.splitext(sub_file)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff']:
+                                        self.logger.info(f"🔧 Dynamic discovery: Found image {sub_path}")
+                                        
+                                        # Use analyze_image tool
+                                        analyze_tool = self.tool_manager.get_tool("analyze_image")
+                                        if analyze_tool:
+                                            result = analyze_tool.func(image_path=sub_path, prompt="Describe this image in detail")
+                                            if result.get("success"):
+                                                self.logger.success(f"✅ Dynamic image analysis completed!")
+                                                self.memory_manager.remember(f"Dynamic image analysis: {sub_path}", {"type": "dynamic_analysis"})
+                                                self.context["status"] = f"Dynamic image analysis completed"
+                                                self.execution_history.log_execution(step_identifier, comment, "success", result.get("output", ""))
+                                                return True
+                        else:
+                            # It's a file, check if it's an image
+                            if os.path.splitext(target)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff']:
+                                self.logger.info(f"🔧 Dynamic discovery: Found image {full_path}")
+                                
+                                # Use analyze_image tool
+                                analyze_tool = self.tool_manager.get_tool("analyze_image")
+                                if analyze_tool:
+                                    result = analyze_tool.func(image_path=full_path, prompt="Describe this image in detail")
+                                    if result.get("success"):
+                                        self.logger.success(f"✅ Dynamic image analysis completed!")
+                                        self.memory_manager.remember(f"Dynamic image analysis: {full_path}", {"type": "dynamic_analysis"})
+                                        self.context["status"] = f"Dynamic image analysis completed"
+                                        self.execution_history.log_execution(step_identifier, comment, "success", result.get("output", ""))
+                                        return True
+        
+        # Dynamic error resolution - try different approaches
+        elif "Directory not found" in error_msg or "Access denied" in error_msg:
+            if tool_name == "list_dir" and "directory" in args:
+                import os
+                directory = args["directory"]
+                
+                # Try different approaches dynamically
+                approaches = [
+                    ("parent directory", os.path.dirname(directory)),
+                    ("current directory", "."),
+                    ("home directory", os.path.expanduser("~")),
+                    ("project root", settings.BASE_DIR)
+                ]
+                
+                for approach_name, test_dir in approaches:
+                    if test_dir and test_dir != directory and os.path.exists(test_dir):
+                        self.logger.info(f"🔧 Trying {approach_name}: {test_dir}")
+                        new_args = args.copy()
+                        new_args["directory"] = test_dir
+                        tool = self.tool_manager.get_tool(tool_name)
+                        if tool:
+                            result = tool.func(**new_args)
+                            if result.get("success"):
+                                self.logger.success(f"✅ Error resolved! Found {approach_name}: {test_dir}")
+                                self.memory_manager.remember(f"Auto-resolved directory error: {directory} -> {test_dir}", {"type": "error_resolution"})
+                                self.context["status"] = f"Step completed after error resolution"
+                                self.execution_history.log_execution(step_identifier, comment, "success", result.get("output", ""))
+                                return True
+        
+        self.logger.warning(f"❌ Could not auto-resolve error: {error_msg}")
+        return False

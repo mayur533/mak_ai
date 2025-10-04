@@ -56,6 +56,21 @@ class Settings:
         self.TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "en")
         self.TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
         
+        # Google Search Configuration (uses Gemini API key)
+        # No separate API key needed - uses GEMINI_API_KEY
+        
+        # Context Management Configuration
+        self.CONTEXT_CACHE_SIZE = int(os.getenv("CONTEXT_CACHE_SIZE", "1000"))
+        self.CONTEXT_MAX_LENGTH = int(os.getenv("CONTEXT_MAX_LENGTH", "50000"))
+        self.SESSION_PERSISTENCE = os.getenv("SESSION_PERSISTENCE", "true").lower() == "true"
+        
+        # Gemini API Advanced Configuration
+        self.GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.7"))
+        self.GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "8192"))
+        self.GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.95"))
+        self.GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))
+        self.GEMINI_SAFETY_SETTINGS = os.getenv("GEMINI_SAFETY_SETTINGS", "moderate")
+        
         # Development Configuration
         self.DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
         self.VERBOSE_LOGGING = os.getenv("VERBOSE_LOGGING", "false").lower() == "true"
