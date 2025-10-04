@@ -349,6 +349,20 @@ class AISystem:
                 func=self.base_tools.read_screen
             ),
             Tool(
+                name="click_screen",
+                code="",
+                doc="Click at specific screen coordinates. Usage: click_screen(x, y, button='left')",
+                is_dynamic=False,
+                func=self.base_tools.click_screen
+            ),
+            Tool(
+                name="get_mouse_position",
+                code="",
+                doc="Get current mouse position. Usage: get_mouse_position()",
+                is_dynamic=False,
+                func=self.base_tools.get_mouse_position
+            ),
+            Tool(
                 name="generate_structured_output",
                 code="",
                 doc="Generate structured output using JSON schema. Usage: generate_structured_output(prompt, schema)",
@@ -748,6 +762,8 @@ Your core process is as follows:
 - Use `find_files` to search for files by pattern (e.g., "*.png", "*.jpg")
 - Use `analyze_image` to analyze any image file you discover
 - Use `read_screen` to capture and analyze the current screen
+- Use `click_screen` to click at specific screen coordinates (x, y)
+- Use `get_mouse_position` to get current mouse coordinates
 - Use `search_directory` to search for text content across multiple files
 - Use `enhanced_web_search` for comprehensive web searches
 - When the entire task is complete, you MUST use the `complete_task` tool with a summary message
@@ -861,7 +877,8 @@ Always return a valid JSON object.
         # Reset execution history for new task
         self.context["execution_history"].clear()
         
-        self.logger.banner(f"Processing Request: {user_input}")
+        self.logger.debug(f"Processing Request: {user_input}")
+        print(f"\n🔄 Processing: {user_input}")
         
         while True:
             prompt = self._construct_prompt()
@@ -946,20 +963,17 @@ Always return a valid JSON object.
         
         try:
             self.tool_manager.update_tool_usage(action)
-            self.logger.info(f"🔧 Executing tool: {action}")
-            self.logger.info(f"📋 Arguments: {json.dumps(args, indent=2)}")
-            print(f"\n🔧 Tool Call: {action}")
-            print(f"📋 Arguments: {json.dumps(args, indent=2)}")
-            print("─" * 50)
+            self.logger.debug(f"🔧 Executing tool: {action}")
+            self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
+            # Removed console output for cleaner interface
             
             result = tool.func(**args)
             
-            print("─" * 50)
+            # Removed console output for cleaner interface
             if result.get("success"):
-                print(f"✅ Tool '{action}' completed successfully")
+                self.logger.debug(f"✅ Tool '{action}' completed successfully")
             else:
-                print(f"❌ Tool '{action}' failed: {result.get('error', 'Unknown error')}")
-            print()
+                self.logger.debug(f"❌ Tool '{action}' failed: {result.get('error', 'Unknown error')}")
             
             # Dynamically extract all meaningful content from result
             # Look for common output field names in order of preference
@@ -1023,11 +1037,22 @@ Always return a valid JSON object.
             self.context["execution_history"].append(execution_entry)
             
             if output_text == "TASK_COMPLETED_SIGNAL":
+                print(f"\n{'🎉'*20}")
+                print(f"🎉 TASK COMPLETED SUCCESSFULLY! 🎉")
+                print(f"{'🎉'*20}\n")
                 self.logger.success("Task completed successfully!")
                 self.context["status"] = "Task completed successfully."
                 return True
             
             if result.get("success"):
+                # Display structured output
+                print(f"\n{'='*60}")
+                print(f"✅ STEP COMPLETED: {comment}")
+                print(f"{'='*60}")
+                print(f"📋 Tool: {action}")
+                print(f"📊 Result: {output_text}")
+                print(f"{'='*60}\n")
+                
                 self.logger.success(f"Step completed. Output:\n{output_text}")
                 self.memory_manager.remember(
                     f"Executed '{action}' successfully. Output: {output_text}", 

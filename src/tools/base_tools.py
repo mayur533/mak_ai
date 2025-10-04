@@ -87,9 +87,8 @@ class BaseTools:
                 quoted_path = f'"{path}"'
                 command = command.replace(path, quoted_path)
             
-            # Show command execution in real-time
-            print(f"\n🔧 Executing: {command}")
-            print("─" * 50)
+            # Log command execution (debug level only)
+            self.logger.debug(f"🔧 Executing: {command}")
             
             # Execute command with enhanced error handling
             start_time = time.time()
@@ -124,10 +123,10 @@ class BaseTools:
             output_parts = []
             if captured_result.stdout:
                 output_parts.append(f"stdout:\n{captured_result.stdout}")
-                print(f"\n📤 stdout:\n{captured_result.stdout}")
+                self.logger.debug(f"📤 stdout:\n{captured_result.stdout}")
             if captured_result.stderr:
                 output_parts.append(f"stderr:\n{captured_result.stderr}")
-                print(f"\n⚠️ stderr:\n{captured_result.stderr}")
+                self.logger.debug(f"⚠️ stderr:\n{captured_result.stderr}")
             
             output = "\n".join(output_parts) if output_parts else "No output"
             
@@ -1169,6 +1168,72 @@ class BaseTools:
             results.append({"file_path": file_path, "result": result})
         
         return {"success": True, "results": results}
+    
+    def click_screen(self, x: int, y: int, button: str = "left") -> Dict[str, Any]:
+        """Click at specific screen coordinates using xdotool."""
+        try:
+            import subprocess
+            
+            # Use xdotool to click at coordinates
+            cmd = ["xdotool", "click", "--clearmodifiers", str(x), str(y)]
+            if button != "left":
+                cmd.extend(["--button", button])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": f"Clicked at coordinates ({x}, {y}) with {button} button",
+                    "message": f"Successfully clicked at ({x}, {y})"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool failed: {result.stderr}",
+                    "output": f"Failed to click at ({x}, {y})"
+                }
+                
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Click operation timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error clicking screen: {e}"}
+    
+    def get_mouse_position(self) -> Dict[str, Any]:
+        """Get current mouse position using xdotool."""
+        try:
+            import subprocess
+            
+            result = subprocess.run(["xdotool", "getmouselocation", "--shell"], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                # Parse the output
+                lines = result.stdout.strip().split('\n')
+                coords = {}
+                for line in lines:
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        coords[key] = int(value)
+                
+                return {
+                    "success": True,
+                    "output": f"Mouse position: X={coords.get('X', 0)}, Y={coords.get('Y', 0)}",
+                    "x": coords.get('X', 0),
+                    "y": coords.get('Y', 0),
+                    "message": f"Mouse is at ({coords.get('X', 0)}, {coords.get('Y', 0)})"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool failed: {result.stderr}",
+                    "output": "Failed to get mouse position"
+                }
+                
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Mouse position query timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error getting mouse position: {e}"}
     
     def read_screen(self, prompt: str = "Describe what you see on this screen in detail") -> Dict[str, Any]:
         """Capture the current screen, analyze it with AI, and clean up the temporary image."""
