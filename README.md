@@ -1,4 +1,4 @@
-# AI Assistant System
+# AI Assistant System (MAK AI)
 
 A modular, self-improving AI agent system with dynamic tool creation, memory persistence, and voice capabilities.
 
