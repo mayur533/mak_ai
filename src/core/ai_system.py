@@ -86,7 +86,61 @@ class AISystem:
             except Exception as e:
                 self.logger.warning(f"Failed to start health server: {e}")
         
+        # Warm up caches with common data
+        self._warmup_caches()
+        
         self.logger.success("AI System initialized successfully")
+    
+    def _warmup_caches(self):
+        """Warm up caches with common data for better performance."""
+        try:
+            # Warm up Gemini cache with common prompts
+            common_prompts = [
+                "What is the current time?",
+                "Help me with a simple task",
+                "Explain how to use this system",
+                "What are your capabilities?",
+                "How can I get help?"
+            ]
+            
+            self.gemini_client.warmup_cache(common_prompts)
+            
+            # Optimize context storage
+            self.context_manager.optimize_context_storage()
+            
+            self.logger.info("System caches warmed up successfully")
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to warm up caches: {e}")
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get comprehensive performance statistics."""
+        try:
+            return {
+                'gemini_cache': self.gemini_client.get_cache_stats(),
+                'context_cache': self.context_manager.get_cache_stats(),
+                'system_metrics': metrics_collector.get_metrics_summary()
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting performance stats: {e}")
+            return {}
+    
+    def optimize_performance(self):
+        """Run system performance optimization."""
+        try:
+            # Optimize Gemini cache
+            self.gemini_client.clear_cache()
+            
+            # Optimize context storage
+            self.context_manager.optimize_context_storage()
+            
+            # Run system optimization
+            metrics_collector.optimize_memory()
+            
+            self.logger.info("System performance optimized")
+            
+        except Exception as e:
+            self.logger.error(f"Error optimizing performance: {e}")
     
     def _load_system_config(self) -> Dict[str, Any]:
         """Load system configuration from system.json file."""

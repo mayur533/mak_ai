@@ -6,6 +6,8 @@ Handles persistent context, project tracking, and context caching with summariza
 import json
 import os
 import time
+import gzip
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -62,9 +64,50 @@ class ContextManager:
         # Ensure db directory exists
         self.context_file.parent.mkdir(exist_ok=True)
         
+        # Compression settings
+        self.compression_enabled = True
+        self.compression_level = 6
+        self.min_compress_size = 1024
+        
+        # Context caching
+        self._context_cache = {}
+        self._cache_lock = threading.RLock()
+        
         self._load_system_config()
         self._load_context()
         self._load_projects()
+    
+    def _compress_data(self, data: Any) -> bytes:
+        """Compress data for storage."""
+        if not self.compression_enabled:
+            return json.dumps(data, default=str).encode()
+        
+        try:
+            json_str = json.dumps(data, default=str)
+            if len(json_str.encode()) > self.min_compress_size:
+                compressed = gzip.compress(json_str.encode(), compresslevel=self.compression_level)
+                return b'COMPRESSED:' + compressed
+            else:
+                return b'UNCOMPRESSED:' + json_str.encode()
+        except Exception as e:
+            self.logger.error(f"Error compressing data: {e}")
+            return json.dumps(data, default=str).encode()
+    
+    def _decompress_data(self, data: bytes) -> Any:
+        """Decompress data from storage."""
+        try:
+            if data.startswith(b'COMPRESSED:'):
+                compressed_data = data[11:]
+                json_str = gzip.decompress(compressed_data).decode()
+                return json.loads(json_str)
+            elif data.startswith(b'UNCOMPRESSED:'):
+                json_str = data[13:].decode()
+                return json.loads(json_str)
+            else:
+                return json.loads(data.decode())
+        except Exception as e:
+            self.logger.error(f"Error decompressing data: {e}")
+            return {}
     
     def _load_system_config(self):
         """Load system configuration from file."""
@@ -78,12 +121,21 @@ class ContextManager:
                 self.system_config = {}
     
     def _load_context(self):
-        """Load context from file."""
+        """Load context from file with compression support."""
         if self.context_file.exists():
             try:
-                with open(self.context_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.current_project = ProjectContext(**data) if data else None
+                # Try to read as compressed data first
+                with open(self.context_file, 'rb') as f:
+                    data_bytes = f.read()
+                
+                if data_bytes.startswith(b'COMPRESSED:') or data_bytes.startswith(b'UNCOMPRESSED:'):
+                    # Compressed format
+                    data = self._decompress_data(data_bytes)
+                else:
+                    # Legacy JSON format
+                    data = json.loads(data_bytes.decode())
+                
+                self.current_project = ProjectContext(**data) if data else None
                 self.logger.info("Context loaded from file")
             except Exception as e:
                 self.logger.error(f"Failed to load context: {e}")
@@ -106,11 +158,22 @@ class ContextManager:
                 self.projects = {}
     
     def _save_context(self):
-        """Save current context to file."""
+        """Save current context to file with compression."""
         try:
             if self.current_project:
-                with open(self.context_file, 'w', encoding='utf-8') as f:
-                    json.dump(asdict(self.current_project), f, indent=2)
+                # Compress data
+                compressed_data = self._compress_data(asdict(self.current_project))
+                
+                # Save compressed data
+                with open(self.context_file, 'wb') as f:
+                    f.write(compressed_data)
+                
+                # Update cache
+                with self._cache_lock:
+                    self._context_cache['current_project'] = {
+                        'data': self.current_project,
+                        'timestamp': time.time()
+                    }
         except Exception as e:
             self.logger.error(f"Failed to save context: {e}")
     
@@ -131,6 +194,36 @@ class ContextManager:
                 json.dump(system_data, f, indent=2)
         except Exception as e:
             self.logger.error(f"Failed to save projects: {e}")
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get context cache statistics."""
+        with self._cache_lock:
+            return {
+                'cache_size': len(self._context_cache),
+                'compression_enabled': self.compression_enabled,
+                'compression_level': self.compression_level
+            }
+    
+    def optimize_context_storage(self):
+        """Optimize context storage by compressing and cleaning up."""
+        try:
+            if self.current_project:
+                # Recompress with optimal settings
+                compressed_data = self._compress_data(asdict(self.current_project))
+                
+                # Save optimized version
+                with open(self.context_file, 'wb') as f:
+                    f.write(compressed_data)
+                
+                self.logger.info("Context storage optimized")
+        except Exception as e:
+            self.logger.error(f"Error optimizing context storage: {e}")
+    
+    def clear_cache(self):
+        """Clear context cache."""
+        with self._cache_lock:
+            self._context_cache.clear()
+        self.logger.info("Context cache cleared")
     
     def get_system_directories(self) -> List[str]:
         """Get list of protected system directories."""

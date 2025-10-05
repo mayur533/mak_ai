@@ -6,8 +6,12 @@ Implements all Gemini API capabilities including function calling, context cachi
 import json
 import requests
 import time
+import hashlib
+import threading
 from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
+from collections import OrderedDict
+from functools import wraps
 
 # Add parent directory to path for imports
 import sys
@@ -29,8 +33,89 @@ class GeminiConfig:
     generation_config: Dict[str, Any] = None
 
 
+class IntelligentCache:
+    """Intelligent caching system with LRU eviction and TTL."""
+    
+    def __init__(self, max_size: int = 1000, max_memory_mb: int = 100):
+        """Initialize intelligent cache."""
+        self.max_size = max_size
+        self.max_memory_bytes = max_memory_mb * 1024 * 1024
+        self.cache = OrderedDict()
+        self.memory_usage = 0
+        self.lock = threading.RLock()
+        self.stats = {'hits': 0, 'misses': 0, 'evictions': 0}
+    
+    def _generate_key(self, *args, **kwargs) -> str:
+        """Generate cache key from arguments."""
+        key_data = {'args': args, 'kwargs': sorted(kwargs.items())}
+        key_str = json.dumps(key_data, sort_keys=True, default=str)
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def _calculate_size(self, data: Any) -> int:
+        """Calculate approximate size of data in bytes."""
+        try:
+            return len(json.dumps(data, default=str).encode('utf-8'))
+        except:
+            return 1024
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache."""
+        with self.lock:
+            if key in self.cache:
+                entry = self.cache[key]
+                # Move to end (most recently used)
+                self.cache.move_to_end(key)
+                self.stats['hits'] += 1
+                return entry['data']
+            self.stats['misses'] += 1
+            return None
+    
+    def set(self, key: str, data: Any, ttl: float = 3600):
+        """Set value in cache."""
+        with self.lock:
+            size = self._calculate_size(data)
+            
+            # Remove existing entry if present
+            if key in self.cache:
+                old_entry = self.cache[key]
+                self.memory_usage -= old_entry['size']
+            
+            # Create new entry
+            entry = {
+                'data': data,
+                'timestamp': time.time(),
+                'size': size,
+                'ttl': ttl
+            }
+            
+            self.cache[key] = entry
+            self.memory_usage += size
+            
+            # Evict if necessary
+            while len(self.cache) > self.max_size or self.memory_usage > self.max_memory_bytes:
+                if not self.cache:
+                    break
+                key_to_remove, entry_to_remove = self.cache.popitem(last=False)
+                self.memory_usage -= entry_to_remove['size']
+                self.stats['evictions'] += 1
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self.lock:
+            total_requests = self.stats['hits'] + self.stats['misses']
+            hit_rate = (self.stats['hits'] / total_requests * 100) if total_requests > 0 else 0
+            return {
+                'size': len(self.cache),
+                'memory_usage_mb': self.memory_usage / (1024 * 1024),
+                'hit_rate_percent': hit_rate,
+                'hits': self.stats['hits'],
+                'misses': self.stats['misses'],
+                'evictions': self.stats['evictions']
+            }
+
+
 class GeminiClient:
-    """Enhanced Gemini API client with advanced features."""
+    """Enhanced Gemini API client with advanced features and performance optimizations."""
     
     def __init__(self):
         """Initialize the Gemini client."""
@@ -42,7 +127,8 @@ class GeminiClient:
         self.max_retries = settings.MAX_RETRIES
         self.rate_limit_delay = 1.0
         
-        # Context caching
+        # Enhanced caching system
+        self.intelligent_cache = IntelligentCache(max_size=1000, max_memory_mb=100)
         self.context_cache = {}
         self.cache_enabled = True
         
@@ -216,7 +302,7 @@ class GeminiClient:
     
     def generate_text(self, prompt: str, config: GeminiConfig = None) -> Dict[str, Any]:
         """
-        Generate text using Gemini with robust error handling.
+        Generate text using Gemini with robust error handling and intelligent caching.
         
         Args:
             prompt: Input prompt
@@ -231,6 +317,15 @@ class GeminiClient:
             
             if not prompt or not prompt.strip():
                 return {"success": False, "error": "Empty or invalid prompt provided"}
+            
+            # Check intelligent cache first
+            if self.cache_enabled:
+                cache_key = self.intelligent_cache._generate_key(prompt, config.model, config.temperature)
+                cached_result = self.intelligent_cache.get(cache_key)
+                
+                if cached_result is not None:
+                    self.logger.debug(f"Intelligent cache hit for prompt: {prompt[:50]}...")
+                    return cached_result
             
             self.logger.debug(f"Generating text with model: {config.model}")
             self.logger.debug(f"Prompt length: {len(prompt)} characters")
@@ -302,12 +397,45 @@ class GeminiClient:
                 "finish_reason": finish_reason
             }
             
+            # Cache successful results
+            if self.cache_enabled and result["success"]:
+                cache_key = self.intelligent_cache._generate_key(prompt, config.model, config.temperature)
+                self.intelligent_cache.set(cache_key, result, ttl=3600)
+                self.logger.debug(f"Cached result for prompt: {prompt[:50]}...")
+            
             self.logger.debug(f"Text generation successful. Length: {len(generated_text)} characters")
             return result
             
         except Exception as e:
             self.logger.error(f"Unexpected error in generate_text: {e}")
             return {"success": False, "error": f"Text generation failed: {str(e)}"}
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get intelligent cache statistics."""
+        return self.intelligent_cache.get_stats()
+    
+    def clear_cache(self):
+        """Clear the intelligent cache."""
+        with self.intelligent_cache.lock:
+            self.intelligent_cache.cache.clear()
+            self.intelligent_cache.memory_usage = 0
+            self.intelligent_cache.stats = {'hits': 0, 'misses': 0, 'evictions': 0}
+        self.logger.info("Intelligent cache cleared")
+    
+    def warmup_cache(self, prompts: List[str]):
+        """Warm up cache with frequently used prompts."""
+        logger.info(f"Warming up Gemini cache with {len(prompts)} prompts...")
+        
+        for prompt in prompts:
+            try:
+                # Generate and cache common responses
+                result = self.generate_text(prompt)
+                if result.get("success"):
+                    logger.debug(f"Warmed up cache for: {prompt[:50]}...")
+            except Exception as e:
+                logger.error(f"Error warming up prompt '{prompt}': {e}")
+        
+        logger.info("Gemini cache warmup completed")
     
     def generate_with_functions(self, prompt: str, functions: List[Dict[str, Any]], 
                               config: GeminiConfig = None, enable_google_search: bool = False) -> Dict[str, Any]:
