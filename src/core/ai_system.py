@@ -1060,15 +1060,27 @@ Always return a valid JSON object.
                 return True
             
             if result.get("success"):
-                # Display structured output
+                # Display structured output without duplicating the full result
                 print(f"\n{'='*60}")
                 print(f"✅ STEP COMPLETED: {comment}")
                 print(f"{'='*60}")
                 print(f"📋 Tool: {action}")
-                print(f"📊 Result: {output_text}")
+                
+                # Use summary if available, otherwise show truncated output
+                summary = result.get('summary', '')
+                if summary:
+                    print(f"📊 Result: {summary}")
+                elif action == "read_screen":
+                    print(f"📊 Result: Screen analyzed successfully - see logs for full details")
+                else:
+                    # For other tools, show truncated output
+                    truncated_output = output_text[:200] + "..." if len(output_text) > 200 else output_text
+                    print(f"📊 Result: {truncated_output}")
+                
                 print(f"{'='*60}\n")
                 
-                self.logger.success(f"Step completed. Output:\n{output_text}")
+                # Log the full output for debugging and context
+                self.logger.success(f"Step completed. Full output:\n{output_text}")
                 self.memory_manager.remember(
                     f"Executed '{action}' successfully. Output: {output_text}", 
                     {"type": "tool_output", "tool": action}

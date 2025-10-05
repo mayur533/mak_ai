@@ -1312,7 +1312,8 @@ class BaseTools:
                     "success": True,
                     "text": analysis_text,
                     "output": formatted_output,
-                    "message": "Screen captured and analyzed successfully"
+                    "message": "Screen captured and analyzed successfully",
+                    "summary": f"Screen analysis completed: {len(analysis_text)} characters analyzed"
                 }
             else:
                 return {
