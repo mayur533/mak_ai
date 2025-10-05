@@ -81,19 +81,8 @@ class AISystem:
         self.health_server = None
         if settings.DEBUG_MODE or getattr(settings, 'ENABLE_HEALTH_SERVER', True):
             try:
-                # Try different ports to avoid conflicts
-                for port in [8001, 8002, 8003, 8004, 8005]:
-                    try:
-                        self.health_server = start_health_server(self, port=port)
-                        self.logger.info(f"Health monitoring server started on port {port}")
-                        break
-                    except OSError as e:
-                        if "Address already in use" in str(e):
-                            continue
-                        else:
-                            raise e
-                else:
-                    self.logger.warning("Could not find available port for health server")
+                self.health_server = start_health_server(self)
+                self.logger.info("Health monitoring server started")
             except Exception as e:
                 self.logger.warning(f"Failed to start health server: {e}")
         
@@ -105,32 +94,21 @@ class AISystem:
     def _warmup_caches(self):
         """Warm up caches with common data for better performance."""
         try:
-            # Check API key status before warmup
-            api_status = self.gemini_client.get_api_key_status()
-            if (api_status.get("primary", {}).get("status") == "rate_limited" and 
-                api_status.get("secondary", {}).get("status") == "rate_limited"):
-                self.logger.warning("Both API keys are rate limited, skipping cache warmup")
-                return
-            
-            # Warm up Gemini cache with common prompts (only if API is available)
+            # Warm up Gemini cache with common prompts
             common_prompts = [
                 "What is the current time?",
                 "Help me with a simple task",
-                "Explain how to use this system"
+                "Explain how to use this system",
+                "What are your capabilities?",
+                "How can I get help?"
             ]
             
-            try:
-                self.gemini_client.warmup_cache(common_prompts)
-                self.logger.info("Gemini cache warmed up successfully")
-            except Exception as e:
-                self.logger.warning(f"Gemini cache warmup failed: {e}")
+            self.gemini_client.warmup_cache(common_prompts)
             
-            # Optimize context storage (this doesn't require API calls)
-            try:
-                self.context_manager.optimize_context_storage()
-                self.logger.info("Context storage optimized successfully")
-            except Exception as e:
-                self.logger.warning(f"Context storage optimization failed: {e}")
+            # Optimize context storage
+            self.context_manager.optimize_context_storage()
+            
+            self.logger.info("System caches warmed up successfully")
             
         except Exception as e:
             self.logger.warning(f"Failed to warm up caches: {e}")
@@ -1219,74 +1197,74 @@ Always return a valid JSON object.
                 return False
             
             tool = self.tool_manager.tools[action]
-            
-            # Execute tool with retry logic and comprehensive error handling
-            max_retries = 3
-            retry_delay = 1.0
-            tool_start_time = time.time()
-            
-            for attempt in range(max_retries):
-                try:
-                    self.tool_manager.update_tool_usage(action)
-                    self.logger.debug(f"🔧 Executing tool: {action} (attempt {attempt + 1}/{max_retries})")
-                    self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
-                    
-                    # Validate tool function exists
-                    if not hasattr(tool, 'func') or not callable(tool.func):
-                        error_msg = f"Tool '{action}' has no callable function"
-                        self.logger.error(error_msg)
-                        self.context["status"] = f"Tool execution failed: {error_msg}"
-                        self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
-                        return False
-                    
-                    result = tool.func(**args)
-                    
-                    # Record tool execution metrics
-                    tool_duration = time.time() - tool_start_time
-                    tool_success = result.get("success", False) if isinstance(result, dict) else False
-                    record_tool_metric(action, tool_duration, tool_success)
-                    
-                    # Validate result structure
-                    if not isinstance(result, dict):
-                        error_msg = f"Tool '{action}' returned invalid result type: {type(result)}"
-                        self.logger.error(error_msg)
-                        if attempt < max_retries - 1:
-                            time.sleep(retry_delay)
-                            continue
-                        else:
-                            self.context["status"] = f"Tool execution failed: {error_msg}"
-                            self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
-                            return False
-                    
-                    break  # Success, exit retry loop
-                    
-                except TypeError as e:
-                    error_msg = f"Tool '{action}' argument error: {e}"
+        
+        # Execute tool with retry logic and comprehensive error handling
+        max_retries = 3
+        retry_delay = 1.0
+        tool_start_time = time.time()
+        
+        for attempt in range(max_retries):
+            try:
+                self.tool_manager.update_tool_usage(action)
+                self.logger.debug(f"🔧 Executing tool: {action} (attempt {attempt + 1}/{max_retries})")
+                self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
+                
+                # Validate tool function exists
+                if not hasattr(tool, 'func') or not callable(tool.func):
+                    error_msg = f"Tool '{action}' has no callable function"
                     self.logger.error(error_msg)
-                    if "unexpected keyword argument" in str(e):
-                        # Don't retry argument errors
-                        self.context["status"] = f"Tool execution failed: {error_msg}"
-                        self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
-                        return False
-                    elif attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        self.context["status"] = f"Tool execution failed: {error_msg}"
-                        self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
-                        return False
-                        
-                except Exception as e:
-                    error_msg = f"Tool '{action}' execution error: {e}"
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                
+                result = tool.func(**args)
+                
+                # Record tool execution metrics
+                tool_duration = time.time() - tool_start_time
+                tool_success = result.get("success", False) if isinstance(result, dict) else False
+                record_tool_metric(action, tool_duration, tool_success)
+                
+                # Validate result structure
+                if not isinstance(result, dict):
+                    error_msg = f"Tool '{action}' returned invalid result type: {type(result)}"
                     self.logger.error(error_msg)
                     if attempt < max_retries - 1:
                         time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
                         continue
                     else:
                         self.context["status"] = f"Tool execution failed: {error_msg}"
                         self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
                         return False
+                
+                break  # Success, exit retry loop
+                
+            except TypeError as e:
+                error_msg = f"Tool '{action}' argument error: {e}"
+                self.logger.error(error_msg)
+                if "unexpected keyword argument" in str(e):
+                    # Don't retry argument errors
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                elif attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                    
+            except Exception as e:
+                error_msg = f"Tool '{action}' execution error: {e}"
+                self.logger.error(error_msg)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
             
             if result.get("success"):
                 self.logger.debug(f"✅ Tool '{action}' completed successfully")
@@ -1736,3 +1714,7 @@ Always return a valid JSON object.
         
         self.logger.warning(f"❌ Could not auto-resolve error: {error_msg}")
         return False
+        
+        except Exception as e:
+            self.logger.error(f"Unexpected error in _execute_plan: {e}")
+            return False
