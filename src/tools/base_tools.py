@@ -102,8 +102,6 @@ class BaseTools:
             )
             execution_time = time.time() - start_time
             
-            print("─" * 50)
-            
             # Capture output for return value with better error handling
             captured_result = subprocess.run(
                 command,
@@ -173,7 +171,7 @@ class BaseTools:
     
     def install_package(self, package_name: str) -> Dict[str, Any]:
         """
-        Install a Python package using pip.
+        Install a Python package using pip in the current virtual environment.
         
         Args:
             package_name: The name of the package to install
@@ -181,7 +179,17 @@ class BaseTools:
         Returns:
             Dict with success status and output/error
         """
-        self.logger.info(f"Installing package: {package_name}")
+        import os
+        
+        venv_path = os.environ.get('VIRTUAL_ENV')
+        if not venv_path:
+            return {
+                "success": False,
+                "error": "No virtual environment detected. Please activate the venv first.",
+                "output": "Virtual environment required for package installation"
+            }
+        
+        self.logger.info(f"Installing package: {package_name} in venv")
         return self.run_shell(f"python3 -m pip install {package_name}")
     
     def read_file(self, file_path: str, encoding: str = "utf-8", max_size_mb: float = 100.0) -> Dict[str, Any]:
@@ -1124,8 +1132,8 @@ class BaseTools:
         try:
             import pylint.lint
         except ImportError:
-            self.logger.info("Pylint not found, attempting to install.")
-            install_result = self.run_shell("pip install pylint")
+            self.logger.info("Pylint not found, attempting to install in venv.")
+            install_result = self.install_package("pylint")
             if not install_result["success"]:
                 return {"success": False, "error": "Pylint is not installed and installation failed."}
             # After successful installation, try to import again
@@ -1291,10 +1299,13 @@ class BaseTools:
                 self.logger.warning(f"Failed to clean up temporary screenshot: {cleanup_error}")
             
             if analysis_result:
+                # Format the analysis result for better readability
+                formatted_output = self._format_screen_analysis(analysis_result)
+                
                 return {
                     "success": True,
                     "text": analysis_result,
-                    "output": analysis_result,
+                    "output": formatted_output,
                     "message": "Screen captured and analyzed successfully"
                 }
             else:
@@ -1317,3 +1328,222 @@ class BaseTools:
                 "error": f"Error reading screen: {e}",
                 "output": f"Error: {e}"
             }
+    
+    def install_system_package(self, package_name: str) -> Dict[str, Any]:
+        """Install system packages using the appropriate package manager."""
+        try:
+            import subprocess
+            import platform
+            import os
+
+            system = platform.system().lower()
+
+            if system == "linux":
+                if os.path.exists("/usr/bin/apt"):
+                    cmd = f"sudo apt update && sudo apt install -y {package_name}"
+                    manager = "apt"
+                elif os.path.exists("/usr/bin/yum"):
+                    cmd = f"sudo yum install -y {package_name}"
+                    manager = "yum"
+                elif os.path.exists("/usr/bin/dnf"):
+                    cmd = f"sudo dnf install -y {package_name}"
+                    manager = "dnf"
+                elif os.path.exists("/usr/bin/pacman"):
+                    cmd = f"sudo pacman -S --noconfirm {package_name}"
+                    manager = "pacman"
+                elif os.path.exists("/usr/bin/zypper"):
+                    cmd = f"sudo zypper install -y {package_name}"
+                    manager = "zypper"
+                else:
+                    return {
+                        "success": False,
+                        "error": "No supported package manager found",
+                        "output": f"Please install {package_name} manually. Supported managers: apt, yum, dnf, pacman, zypper"
+                    }
+            elif system == "darwin":  # macOS
+                if os.path.exists("/usr/local/bin/brew"):
+                    cmd = f"brew install {package_name}"
+                    manager = "homebrew"
+                else:
+                    return {
+                        "success": False,
+                        "error": "Homebrew not found",
+                        "output": f"Please install Homebrew first: /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" then run: brew install {package_name}"
+                    }
+            elif system == "windows":
+                if os.path.exists("C:\\ProgramData\\chocolatey\\bin\\choco.exe"):
+                    cmd = f"choco install {package_name} -y"
+                    manager = "chocolatey"
+                else:
+                    return {
+                        "success": False,
+                        "error": "Chocolatey not found",
+                        "output": f"Please install Chocolatey first: https://chocolatey.org/install then run: choco install {package_name}"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unsupported operating system: {system}",
+                    "output": f"Please install {package_name} manually for {system}"
+                }
+
+            result = self.run_shell(cmd)
+
+            if result["success"]:
+                return {
+                    "success": True,
+                    "output": f"Package '{package_name}' installed successfully using {manager}",
+                    "message": f"Successfully installed {package_name} using {manager}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to install {package_name} using {manager}",
+                    "output": f"Installation failed: {result.get('error', 'Unknown error')}. Manual installation required.",
+                    "manual_command": cmd
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Error installing system package: {e}",
+                "output": f"Please install {package_name} manually"
+            }
+
+    def check_system_dependency(self, dependency: str) -> Dict[str, Any]:
+        """Check if a system dependency is installed and provide installation instructions if not."""
+        try:
+            import subprocess
+            import platform
+            import os
+
+            result = subprocess.run(["which", dependency], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                version_result = subprocess.run([dependency, "--version"], capture_output=True, text=True)
+                version = version_result.stdout.strip() if version_result.returncode == 0 else "Unknown"
+
+                return {
+                    "success": True,
+                    "installed": True,
+                    "path": result.stdout.strip(),
+                    "version": version,
+                    "output": f"{dependency} is installed at {result.stdout.strip()}"
+                }
+            else:
+                system = platform.system().lower()
+                instructions = self._get_installation_instructions(dependency, system)
+
+                return {
+                    "success": False,
+                    "installed": False,
+                    "error": f"{dependency} is not installed",
+                    "output": f"{dependency} not found. Installation instructions: {instructions}",
+                    "instructions": instructions
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Error checking dependency: {e}",
+                "output": f"Could not check if {dependency} is installed"
+            }
+
+    def _get_installation_instructions(self, dependency: str, system: str) -> str:
+        """Get installation instructions for a dependency based on the operating system."""
+        instructions = {
+            "linux": {
+                "xdotool": "sudo apt install xdotool (Ubuntu/Debian) or sudo yum install xdotool (RHEL/CentOS)",
+                "scrot": "sudo apt install scrot (Ubuntu/Debian) or sudo yum install scrot (RHEL/CentOS)",
+                "gnome-screenshot": "sudo apt install gnome-screenshot (Ubuntu/Debian) or sudo yum install gnome-screenshot (RHEL/CentOS)",
+                "import": "sudo apt install imagemagick (Ubuntu/Debian) or sudo yum install ImageMagick (RHEL/CentOS)",
+                "pylint": "pip install pylint (in virtual environment)",
+                "pyautogui": "pip install pyautogui (in virtual environment)"
+            },
+            "darwin": {
+                "screencapture": "Built-in on macOS",
+                "xdotool": "brew install xdotool",
+                "pylint": "pip install pylint (in virtual environment)",
+                "pyautogui": "pip install pyautogui (in virtual environment)"
+            },
+            "windows": {
+                "xdotool": "Not available on Windows. Use pyautogui instead.",
+                "pylint": "pip install pylint (in virtual environment)",
+                "pyautogui": "pip install pyautogui (in virtual environment)"
+            }
+        }
+
+        return instructions.get(system, {}).get(dependency, f"Please install {dependency} manually for {system}")
+    
+    def _format_screen_analysis(self, analysis_text: str) -> str:
+        """Format screen analysis text for better readability."""
+        try:
+            # Split the analysis into sections
+            lines = analysis_text.split('\n')
+            formatted_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    formatted_lines.append("")
+                    continue
+                
+                # Format headers and subheaders
+                if line.startswith('**') and line.endswith('**'):
+                    # Main header
+                    header_text = line[2:-2]
+                    formatted_lines.append(f"\n{'='*60}")
+                    formatted_lines.append(f"📋 {header_text.upper()}")
+                    formatted_lines.append(f"{'='*60}")
+                elif line.startswith('*   **') and line.endswith('**'):
+                    # Subheader
+                    subheader_text = line[6:-2]
+                    formatted_lines.append(f"\n🔹 {subheader_text}")
+                    formatted_lines.append("-" * 40)
+                elif line.startswith('*   '):
+                    # Bullet point
+                    bullet_text = line[4:]
+                    formatted_lines.append(f"  • {bullet_text}")
+                elif line.startswith('1.  **') and line.endswith('**'):
+                    # Numbered item with bold
+                    item_text = line[6:-2]
+                    formatted_lines.append(f"\n📌 {item_text}")
+                elif line.startswith('2.  **') and line.endswith('**'):
+                    # Numbered item with bold
+                    item_text = line[6:-2]
+                    formatted_lines.append(f"\n📌 {item_text}")
+                elif line.startswith('3.  **') and line.endswith('**'):
+                    # Numbered item with bold
+                    item_text = line[6:-2]
+                    formatted_lines.append(f"\n📌 {item_text}")
+                else:
+                    # Regular text
+                    formatted_lines.append(f"  {line}")
+            
+            # Join all lines and add some spacing
+            formatted_text = "\n".join(formatted_lines)
+            
+            # Add a header and footer
+            final_output = f"""
+🖥️  SCREEN ANALYSIS REPORT
+{'='*60}
+
+{formatted_text}
+
+{'='*60}
+✅ Analysis completed successfully
+"""
+            
+            return final_output.strip()
+            
+        except Exception as e:
+            # If formatting fails, return the original text with a simple header
+            return f"""
+🖥️  SCREEN ANALYSIS
+{'='*50}
+
+{analysis_text}
+
+{'='*50}
+✅ Analysis completed
+"""

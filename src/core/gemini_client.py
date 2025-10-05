@@ -830,40 +830,17 @@ Return only the JSON object, no additional text.
             
             # Use Google Search grounding for real-time information
             try:
-                from google import genai
-                from google.genai import types
+                import google.generativeai as genai
             except ImportError as e:
                 self.logger.error(f"Google Search dependencies not available: {e}")
                 return {"success": False, "error": "Google Search not available - dependencies not installed"}
             
-            # Initialize client with API key
+            # Configure Gemini with Google Search
             try:
-                client = genai.Client(api_key=self.current_api_key)
+                genai.configure(api_key=self.current_api_key)
             except Exception as e:
-                self.logger.error(f"Failed to initialize Google client: {e}")
-                return {"success": False, "error": f"Failed to initialize search client: {str(e)}"}
-            
-            # Create grounding tool with Google Search, code execution, and URL context
-            try:
-                grounding_tool = types.Tool(google_search=types.GoogleSearch())
-                code_execution_tool = types.Tool(code_execution=types.ToolCodeExecution())
-                url_context_tool = types.Tool(url_context=types.UrlContext())
-            except Exception as e:
-                self.logger.error(f"Failed to create search tools: {e}")
-                return {"success": False, "error": f"Failed to create search tools: {str(e)}"}
-            
-            # Configure with dynamic parameters based on query complexity
-            try:
-                config = types.GenerateContentConfig(
-                    tools=[grounding_tool, code_execution_tool, url_context_tool],
-                    max_output_tokens=complexity['max_tokens'],
-                    temperature=0.1,
-                    top_p=0.8,
-                    top_k=40
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to create search config: {e}")
-                return {"success": False, "error": f"Failed to create search configuration: {str(e)}"}
+                self.logger.error(f"Failed to configure Gemini: {e}")
+                return {"success": False, "error": f"Failed to configure search client: {str(e)}"}
             
             # Create a dynamic prompt based on query complexity
             if complexity['level'] == 'simple':
@@ -889,13 +866,11 @@ Source Requirements:
 
 Please provide a comprehensive, well-researched answer using the available tools and sources."""
 
-            # Perform search with grounding
+            # Perform search with grounding using the existing method
             try:
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=enhanced_query,
-                    config=config,
-                )
+                response = self.generate_with_google_search(enhanced_query)
+                if not response.get("success"):
+                    return response
             except Exception as e:
                 self.logger.error(f"Search request failed: {e}")
                 return {"success": False, "error": f"Search request failed: {str(e)}"}
@@ -908,27 +883,13 @@ Please provide a comprehensive, well-researched answer using the available tools
                 return {"success": False, "error": "No response received from search"}
             
             # Extract response with validation
-            result = ""
-            if hasattr(response, 'text') and response.text:
-                result = response.text.strip()
-                if not result:
-                    self.logger.error("Search response is empty after stripping")
-                    return {"success": False, "error": "Search response is empty"}
-            else:
-                self.logger.error("No text in search response")
-                return {"success": False, "error": "No text in search response"}
+            result = response.get("text", "").strip()
+            if not result:
+                self.logger.error("Search response is empty after stripping")
+                return {"success": False, "error": "Search response is empty"}
             
             # Get usage metadata with validation
-            usage_metadata = {}
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                try:
-                    usage_metadata = {
-                        "prompt_token_count": getattr(response.usage_metadata, 'prompt_token_count', 0),
-                        "candidates_token_count": getattr(response.usage_metadata, 'candidates_token_count', 0),
-                        "total_token_count": getattr(response.usage_metadata, 'total_token_count', 0)
-                    }
-                except Exception as e:
-                    self.logger.warning(f"Failed to extract usage metadata: {e}")
+            usage_metadata = response.get("usage", {})
             
             self.logger.success(f"✅ Search completed in {search_time:.2f} seconds")
             
@@ -1025,25 +986,6 @@ Please provide a comprehensive, well-researched answer using the available tools
             self.logger.info(f"🔗 Analyzing {len(urls)} URLs")
             start_time = time.time()
             
-            # Use Google Gemini with URL context
-            from google import genai
-            from google.genai import types
-            
-            # Initialize client with API key
-            client = genai.Client(api_key=self.api_key)
-            
-            # Create URL context tool
-            url_context_tool = types.Tool(url_context=types.UrlContext())
-            
-            # Configure for URL analysis
-            config = types.GenerateContentConfig(
-                tools=[url_context_tool],
-                max_output_tokens=8192,
-                temperature=0.1,
-                top_p=0.8,
-                top_k=40
-            )
-            
             # Create analysis prompt
             analysis_prompt = f"""Please analyze the following URLs and provide comprehensive information about each:
 
@@ -1058,18 +1000,14 @@ For each URL, provide:
 
 Please structure your response clearly for each URL."""
 
-            # Perform URL analysis
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=analysis_prompt,
-                config=config,
-            )
+            # Perform URL analysis using existing method
+            response = self.generate_text(analysis_prompt)
             
             analysis_time = time.time() - start_time
             self.logger.success(f"✅ URL analysis completed in {analysis_time:.2f} seconds")
             
             # Extract response
-            result = response.text if response.text else ""
+            result = response.get("text", "") if response.get("success") else ""
             
             return {
                 "success": True,

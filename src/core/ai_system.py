@@ -363,6 +363,20 @@ class AISystem:
                 func=self.base_tools.get_mouse_position
             ),
             Tool(
+                name="install_system_package",
+                code="",
+                doc="Install system packages using package manager. Usage: install_system_package(package_name)",
+                is_dynamic=False,
+                func=self.base_tools.install_system_package
+            ),
+            Tool(
+                name="check_system_dependency",
+                code="",
+                doc="Check if system dependency is installed and get installation instructions. Usage: check_system_dependency(dependency_name)",
+                is_dynamic=False,
+                func=self.base_tools.check_system_dependency
+            ),
+            Tool(
                 name="generate_structured_output",
                 code="",
                 doc="Generate structured output using JSON schema. Usage: generate_structured_output(prompt, schema)",
@@ -764,6 +778,9 @@ Your core process is as follows:
 - Use `read_screen` to capture and analyze the current screen
 - Use `click_screen` to click at specific screen coordinates (x, y)
 - Use `get_mouse_position` to get current mouse coordinates
+- Use `install_package` to install Python packages in virtual environment
+- Use `install_system_package` to install system packages using package manager
+- Use `check_system_dependency` to check if system tools are installed and get installation instructions
 - Use `search_directory` to search for text content across multiple files
 - Use `enhanced_web_search` for comprehensive web searches
 - When the entire task is complete, you MUST use the `complete_task` tool with a summary message
@@ -965,11 +982,9 @@ Always return a valid JSON object.
             self.tool_manager.update_tool_usage(action)
             self.logger.debug(f"🔧 Executing tool: {action}")
             self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
-            # Removed console output for cleaner interface
             
             result = tool.func(**args)
             
-            # Removed console output for cleaner interface
             if result.get("success"):
                 self.logger.debug(f"✅ Tool '{action}' completed successfully")
             else:
