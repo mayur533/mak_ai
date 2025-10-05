@@ -79,6 +79,7 @@ class BaseTools:
                 if f'cd {dangerous_dir}' in command or f'cd {dangerous_dir}/' in command:
                     return {"success": False, "error": f"Access denied: System directory access not allowed: {command}"}
             
+            
             # Auto-quote file paths with spaces for Linux compatibility
             # Pattern to match file paths with spaces
             path_pattern = r'/[^\s]*\s[^\s]*'
@@ -168,6 +169,118 @@ class BaseTools:
             error_msg = f"Unexpected error in command execution: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
             return {"success": False, "error": error_msg, "command": command}
+
+    async def run_shell_async(self, command: str, timeout: int = 300) -> Dict[str, Any]:
+        """
+        Execute a shell command asynchronously for blocking commands like browsers.
+        
+        Args:
+            command: The shell command to execute
+            timeout: Maximum time to wait for command completion
+            
+        Returns:
+            Dict with success status and output/error
+        """
+        try:
+            import asyncio
+            import subprocess
+            
+            # Validate input
+            if not command or not command.strip():
+                return {"success": False, "error": "Empty or invalid command provided"}
+            
+            command = command.strip()
+            self.logger.info(f"Executing async shell command: `{command}`")
+            
+            # Enhanced security checks (same as run_shell)
+            dangerous_patterns = [
+                r'rm\s+-rf\s+/',  # Dangerous rm commands
+                r'mkfs\.',        # Format commands
+                r'dd\s+if=',      # Disk operations
+                r'>\s*/dev/',     # Redirecting to device files
+                r'chmod\s+777',   # Dangerous permissions
+                r'chown\s+-R\s+root',  # Dangerous ownership changes
+                r'sudo\s+rm',     # Sudo with rm
+                r'su\s+-',        # Switch user
+                r'passwd',        # Password changes
+                r'shutdown',      # System shutdown
+                r'reboot',        # System reboot
+                r'halt',          # System halt
+                r'poweroff',      # Power off
+                r'init\s+0',      # Init level 0
+                r'killall',       # Kill all processes
+                r'pkill\s+-9',    # Force kill
+                r'kill\s+-9\s+-1', # Kill all processes
+            ]
+            
+            import re
+            for pattern in dangerous_patterns:
+                if re.search(pattern, command, re.IGNORECASE):
+                    return {"success": False, "error": f"Access denied: Potentially dangerous command detected: {command}"}
+            
+            # Check for system directory access
+            dangerous_dirs = ['/root', '/etc', '/sys', '/proc', '/dev', '/var', '/usr', '/bin', '/sbin', '/lib', '/lib64']
+            for dangerous_dir in dangerous_dirs:
+                if f'cd {dangerous_dir}' in command or f'cd {dangerous_dir}/' in command:
+                    return {"success": False, "error": f"Access denied: System directory access not allowed: {command}"}
+            
+            # Auto-quote file paths with spaces for Linux compatibility
+            path_pattern = r'/[^\s]*\s[^\s]*'
+            paths_with_spaces = re.findall(path_pattern, command)
+            for path in paths_with_spaces:
+                quoted_path = f'"{path}"'
+                command = command.replace(path, quoted_path)
+            
+            # Execute command asynchronously
+            start_time = time.time()
+            
+            # Use asyncio.create_subprocess_shell for async execution
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=settings.BASE_DIR,
+                env=os.environ.copy()
+            )
+            
+            try:
+                # Wait for process completion with timeout
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), 
+                    timeout=timeout
+                )
+                
+                execution_time = time.time() - start_time
+                
+                # Decode output
+                stdout_text = stdout.decode('utf-8', errors='ignore') if stdout else ""
+                stderr_text = stderr.decode('utf-8', errors='ignore') if stderr else ""
+                
+                # Log execution time
+                self.logger.success(f"Async command completed successfully in {execution_time:.2f}s")
+                
+                # Return result
+                return {
+                    "success": True,
+                    "output": stdout_text.strip() if stdout_text.strip() else "Command executed successfully",
+                    "stdout": stdout_text,
+                    "stderr": stderr_text,
+                    "returncode": process.returncode,
+                    "execution_time": execution_time
+                }
+                
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                process.kill()
+                await process.wait()
+                return {
+                    "success": False,
+                    "error": f"Command timed out after {timeout} seconds",
+                    "output": f"Command '{command}' timed out"
+                }
+                
+        except Exception as e:
+            return {"success": False, "error": f"Error executing async command: {e}"}
     
     
     def install_package(self, package_name: str) -> Dict[str, Any]:
@@ -1901,30 +2014,38 @@ class BaseTools:
                     "output": "Screenshot capture failed - no image data"
                 }
 
-            # Create detailed prompt for action analysis
+            # Create detailed prompt for action analysis with strict validation
             action_prompt = f"""
 Analyze this screenshot and provide actionable steps to complete this task: "{task_description}"
 
-IMPORTANT: Before suggesting actions, check if:
-1. A browser window is visible and active on screen
-2. The browser is in the foreground (not minimized or behind other windows)
-3. The page has loaded completely (no loading indicators)
+CRITICAL VALIDATION RULES:
+1. ONLY analyze what you can actually SEE on the screen
+2. DO NOT assume actions have been completed unless you can clearly see the result
+3. DO NOT make up coordinates or actions that aren't clearly visible
+4. If you cannot clearly see a browser window, DO NOT suggest browser-related actions
+5. If the screen is black, blank, or shows desktop, DO NOT suggest clicking on non-existent elements
+
+STRICT ANALYSIS REQUIREMENTS:
+- If no browser is visible: suggest check_browser_status first
+- If browser is visible but task not completed: suggest specific visible actions
+- If task appears completed: confirm what you actually see completed
+- NEVER fabricate actions or coordinates
 
 Please provide a JSON response with the following structure:
 {{
-    "analysis": "Brief description of what you see on the screen",
+    "analysis": "EXACT description of what you can actually see on the screen",
     "browser_status": {{
-        "browser_visible": true/false,
-        "browser_active": true/false,
-        "page_loaded": true/false,
-        "recommendations": "Any recommendations about browser state"
+        "browser_visible": true/false (only true if you can clearly see a browser window),
+        "browser_active": true/false (only true if browser is clearly in foreground),
+        "page_loaded": true/false (only true if you can see a loaded webpage),
+        "recommendations": "Specific recommendations based on what you actually see"
     }},
     "actions": [
         {{
             "step": 1,
             "action": "check_browser_status|bring_chrome_to_front|click|right_click|double_click|scroll_up|scroll_down|scroll_left|scroll_right|drag|type|key_press",
-            "coordinates": [x, y],
-            "description": "What this action will do",
+            "coordinates": [x, y] (ONLY if you can clearly see the target element),
+            "description": "What this action will do based on what you can see",
             "parameters": {{
                 "text": "text to type (for type action)",
                 "key": "key to press (for key_press action)",
@@ -1933,24 +2054,24 @@ Please provide a JSON response with the following structure:
         }}
     ],
     "confidence": 0.85,
-    "notes": "Any additional notes or warnings about browser state or screen elements"
+    "notes": "Warnings about what you cannot see or verify on screen"
 }}
 
-Available actions:
-- check_browser_status: Check if browser is running and active (use first if unsure)
-- bring_chrome_to_front: Bring Chrome to foreground (use if browser is running but not active)
-- click: Left mouse click at coordinates
-- right_click: Right mouse click at coordinates  
-- double_click: Double click at coordinates
+AVAILABLE ACTIONS (use only what makes sense based on what you can see):
+- check_browser_status: Check if browser is running and active (use first if no browser visible)
+- bring_chrome_to_front: Bring Chrome to foreground (use if browser visible but not active)
+- click: Left mouse click at coordinates (ONLY if you can see the target element)
+- right_click: Right mouse click at coordinates (ONLY if you can see the target element)
+- double_click: Double click at coordinates (ONLY if you can see the target element)
 - scroll_up: Scroll up from coordinates
 - scroll_down: Scroll down from coordinates
 - scroll_left: Scroll left from coordinates
 - scroll_right: Scroll right from coordinates
 - drag: Drag from coordinates to another location
-- type: Type text at coordinates
+- type: Type text at coordinates (ONLY if you can see a text input field)
 - key_press: Press a key combination
 
-Be specific with coordinates and provide clear, actionable steps. Always check browser status first if the task involves web interaction.
+REMEMBER: Be extremely conservative. Only suggest actions for elements you can clearly see and identify on the screen.
 """
 
             gemini_client = GeminiClient()
@@ -1979,16 +2100,20 @@ Be specific with coordinates and provide clear, actionable steps. Always check b
                         json_str = json_match.group()
                         actions_data = json.loads(json_str)
                         
-                        formatted_output = self._format_action_analysis(actions_data)
+                        # Validate the analysis before returning
+                        validated_actions = self._validate_analysis(actions_data, task_description)
+                        
+                        formatted_output = self._format_action_analysis(validated_actions)
                         
                         return {
                             "success": True,
                             "text": analysis_text,
                             "output": formatted_output,
                             "message": "Screen analyzed and actions generated successfully",
-                            "summary": f"Generated {len(actions_data.get('actions', []))} actionable steps",
-                            "actions": actions_data.get('actions', []),
-                            "raw_analysis": analysis_text
+                            "summary": f"Generated {len(validated_actions.get('actions', []))} validated actionable steps",
+                            "actions": validated_actions.get('actions', []),
+                            "raw_analysis": analysis_text,
+                            "validation_notes": validated_actions.get('validation_notes', [])
                         }
                     else:
                         # If no JSON found, return formatted text
@@ -2030,6 +2155,64 @@ Be specific with coordinates and provide clear, actionable steps. Always check b
                 "error": f"Error analyzing screen actions: {e}",
                 "output": f"Error: {e}"
             }
+
+    def _validate_analysis(self, analysis_data: Dict[str, Any], task_description: str) -> Dict[str, Any]:
+        """Validate the analysis data to prevent fake results."""
+        validation_notes = []
+        validated_actions = []
+        
+        # Check browser status
+        browser_status = analysis_data.get('browser_status', {})
+        if browser_status.get('browser_visible', False):
+            if not browser_status.get('browser_active', False):
+                validation_notes.append("Browser visible but not active - may need bring_chrome_to_front")
+        
+        # Validate actions
+        actions = analysis_data.get('actions', [])
+        for action in actions:
+            action_type = action.get('action', '')
+            coordinates = action.get('coordinates', [])
+            
+            # Validate coordinates
+            if action_type in ['click', 'right_click', 'double_click', 'type'] and coordinates:
+                if len(coordinates) != 2:
+                    validation_notes.append(f"Invalid coordinates for {action_type}: {coordinates}")
+                    continue
+                
+                x, y = coordinates
+                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                    validation_notes.append(f"Non-numeric coordinates for {action_type}: {coordinates}")
+                    continue
+                
+                if x < 0 or y < 0 or x > 4000 or y > 4000:  # Reasonable screen bounds
+                    validation_notes.append(f"Coordinates out of reasonable bounds for {action_type}: {coordinates}")
+                    continue
+            
+            # Check for suspicious patterns (fake results)
+            description = action.get('description', '').lower()
+            if any(phrase in description for phrase in ['youtube opened', 'search bar clicked', 'typed', 'video playing']):
+                if not browser_status.get('browser_visible', False):
+                    validation_notes.append(f"Suspicious action '{action_type}' without visible browser")
+                    continue
+            
+            validated_actions.append(action)
+        
+        # If no browser is visible but task involves web interaction, add browser check first
+        if 'youtube' in task_description.lower() or 'web' in task_description.lower():
+            if not browser_status.get('browser_visible', False):
+                validated_actions.insert(0, {
+                    "step": 1,
+                    "action": "check_browser_status",
+                    "coordinates": None,
+                    "description": "Check if browser is running and active",
+                    "parameters": {}
+                })
+        
+        # Update the analysis data
+        analysis_data['actions'] = validated_actions
+        analysis_data['validation_notes'] = validation_notes
+        
+        return analysis_data
     
     def _format_action_analysis(self, actions_data: dict) -> str:
         """Format action analysis data for better readability."""

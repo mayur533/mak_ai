@@ -303,6 +303,13 @@ class AISystem:
                 func=self.base_tools.run_shell
             ),
             Tool(
+                name="run_shell_async",
+                code="",
+                doc="Execute shell commands asynchronously for blocking commands like browsers. Usage: run_shell_async(command, timeout=300)",
+                is_dynamic=False,
+                func=self.base_tools.run_shell_async
+            ),
+            Tool(
                 name="create_and_save_tool",
                 code="",
                 doc="Create and register a new tool. Usage: create_and_save_tool(tool_name, tool_code, doc_string)",
@@ -1029,11 +1036,13 @@ Current Status:
 **SMART BROWSER HANDLING:**
 1. Use `check_browser_status` to see what's running
 2. If browser is running but not active, use `bring_chrome_to_front`
-3. If no browser is running, use `run_shell` to open one
-4. Wait a few seconds for the browser to load
-5. Use `read_screen` to see what's actually displayed
-6. Then proceed with the actual task based on what you see
-7. If something fails, try a different approach, don't repeat the same failed action
+3. If no browser is running, use `run_shell_async` for blocking commands like browsers
+4. Use `run_shell_async` for any command that might block (browsers, GUI apps, etc.)
+5. Use `run_shell` for quick commands that return immediately
+6. Wait a few seconds for the browser to load
+7. Use `read_screen` to see what's actually displayed
+8. Then proceed with the actual task based on what you see
+9. If something fails, try a different approach, don't repeat the same failed action
 
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{
