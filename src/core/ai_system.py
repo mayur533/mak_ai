@@ -1059,6 +1059,13 @@ Current Status:
 - `interact_with_process(process_id, "send_input", data)` - Send input to process
 - `interact_with_process(process_id, "kill")` - Terminate the process
 
+**YOUTUBE INTERACTION RULES:**
+- On YouTube search results: Click on VIDEO THUMBNAILS to play videos
+- Video thumbnails are the clickable areas that start video playback
+- Don't look for play buttons on search results - they don't exist
+- Focus on clicking video titles, thumbnails, and channel names
+- Use `click_screen` to click on video thumbnails directly
+
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{
     "plan": [

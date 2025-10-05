@@ -1677,26 +1677,15 @@ class BaseTools:
                     "instructions": check_result.get('instructions', 'Please install xdotool manually.')
                 }
             
-            # Use correct xdotool syntax: first move mouse, then click
-            move_cmd = ["xdotool", "mousemove", str(x), str(y)]
-            move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=3)
-            
-            if move_result.returncode != 0:
-                return {
-                    "success": False,
-                    "error": f"Failed to move mouse: {move_result.stderr}",
-                    "output": f"Could not move mouse to ({x}, {y})"
-                }
-            
-            # Now click at the current mouse position
+            # Use xdotool to click directly at coordinates
             if button == "left":
-                click_cmd = ["xdotool", "click", "1"]  # Button 1 is left click
+                click_cmd = ["xdotool", "mousemove", str(x), str(y), "click", "1"]
             elif button == "right":
-                click_cmd = ["xdotool", "click", "3"]  # Button 3 is right click
+                click_cmd = ["xdotool", "mousemove", str(x), str(y), "click", "3"]
             elif button == "middle":
-                click_cmd = ["xdotool", "click", "2"]  # Button 2 is middle click
+                click_cmd = ["xdotool", "mousemove", str(x), str(y), "click", "2"]
             else:
-                click_cmd = ["xdotool", "click", "--button", button, "1"]
+                click_cmd = ["xdotool", "mousemove", str(x), str(y), "click", "--button", button, "1"]
 
             click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=5)
 
@@ -1707,11 +1696,33 @@ class BaseTools:
                     "message": f"Successfully clicked at ({x}, {y})"
                 }
             else:
-                return {
-                    "success": False,
-                    "error": f"xdotool click failed: {click_result.stderr}",
-                    "output": f"Failed to click at ({x}, {y}) - {click_result.stderr}"
-                }
+                # Try alternative method with separate commands
+                try:
+                    move_cmd = ["xdotool", "mousemove", str(x), str(y)]
+                    move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=3)
+                    
+                    if move_result.returncode == 0:
+                        click_cmd = ["xdotool", "click", "1"] if button == "left" else ["xdotool", "click", "3"]
+                        click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=3)
+                        
+                        if click_result.returncode == 0:
+                            return {
+                                "success": True,
+                                "output": f"Clicked at coordinates ({x}, {y}) with {button} button (using move+click method)",
+                                "message": f"Successfully clicked at ({x}, {y})"
+                            }
+                    
+                    return {
+                        "success": False,
+                        "error": f"xdotool click failed: {click_result.stderr}",
+                        "output": f"Failed to click at ({x}, {y}) - {click_result.stderr}"
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Click operation failed: {e}",
+                        "output": f"Failed to click at ({x}, {y})"
+                    }
 
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "Click operation timed out"}
@@ -2138,11 +2149,18 @@ CRITICAL VALIDATION RULES:
 4. If you cannot clearly see a browser window, DO NOT suggest browser-related actions
 5. If the screen is black, blank, or shows desktop, DO NOT suggest clicking on non-existent elements
 
+YOUTUBE-SPECIFIC RULES:
+- On YouTube search results: Click on VIDEO THUMBNAILS to play videos (no play button needed)
+- Video thumbnails are the clickable areas that start video playback
+- Look for video titles, thumbnails, and channel names as click targets
+- Don't look for play buttons on search results - they don't exist
+
 STRICT ANALYSIS REQUIREMENTS:
 - If no browser is visible: suggest check_browser_status first
 - If browser is visible but task not completed: suggest specific visible actions
 - If task appears completed: confirm what you actually see completed
 - NEVER fabricate actions or coordinates
+- For YouTube: focus on clicking video thumbnails, not play buttons
 
 Please provide a JSON response with the following structure:
 {{
@@ -2307,6 +2325,12 @@ REMEMBER: Be extremely conservative. Only suggest actions for elements you can c
                 if not browser_status.get('browser_visible', False):
                     validation_notes.append(f"Suspicious action '{action_type}' without visible browser")
                     continue
+            
+            # YouTube-specific validation - clicking thumbnails is normal
+            if 'youtube' in task_description.lower() and action_type == 'click':
+                if any(phrase in description for phrase in ['thumbnail', 'video', 'click on video', 'play video']):
+                    # This is a valid YouTube action, don't filter it out
+                    pass
             
             validated_actions.append(action)
         

@@ -163,6 +163,19 @@
       "context_summary": "",
       "context_hash": "",
       "is_active": true
+    },
+    "proj_1759645105_0ad14a54": {
+      "project_id": "proj_1759645105_0ad14a54",
+      "project_name": "Default Project",
+      "project_path": "/home/mayur/Desktop/AI Automation/base agent system/ai_assistant_system",
+      "created_at": 1759645105.2248635,
+      "last_accessed": 1759645105.2248645,
+      "current_directory": "/home/mayur/Desktop/AI Automation/base agent system/ai_assistant_system",
+      "full_context": [],
+      "actual_context": [],
+      "context_summary": "",
+      "context_hash": "",
+      "is_active": true
     }
   }
 }
