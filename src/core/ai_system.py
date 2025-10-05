@@ -450,6 +450,20 @@ class AISystem:
                 func=self.base_tools.get_mouse_position
             ),
             Tool(
+                name="bring_chrome_to_front",
+                code="",
+                doc="Bring Chrome browser to the foreground if it's running. Usage: bring_chrome_to_front()",
+                is_dynamic=False,
+                func=self.base_tools.bring_chrome_to_front
+            ),
+            Tool(
+                name="check_browser_status",
+                code="",
+                doc="Check if browser is running and active. Usage: check_browser_status()",
+                is_dynamic=False,
+                func=self.base_tools.check_browser_status
+            ),
+            Tool(
                 name="install_system_package",
                 code="",
                 doc="Install system packages using package manager. Usage: install_system_package(package_name)",
@@ -1003,18 +1017,23 @@ Current Status:
 - Use the execution history to understand what has been tried before
 
 **INTELLIGENT DYNAMIC WORKFLOW:**
+- ALWAYS use `check_browser_status` first to see what browsers are running
+- If a browser is running but not active, use `bring_chrome_to_front` to activate it
+- Only open new browser instances if no browser is running
 - Use `run_shell` to execute system commands and open applications
-- For web tasks: use `run_shell` to open browsers with URLs
+- For web tasks: check browser status first, then either activate existing or open new
 - Use `read_screen` to see what's actually on screen
 - NEVER get stuck in loops - if a tool fails 2-3 times, try a completely different approach
 - Always adapt to what's actually present, not what you assume should be there
 
-**SMART COMMAND HANDLING:**
-1. Use `run_shell` to execute the appropriate system command
-2. Wait a few seconds for the command to complete
-3. Use `read_screen` to see what's actually displayed
-4. Then proceed with the actual task based on what you see
-5. If something fails, try a different approach, don't repeat the same failed action
+**SMART BROWSER HANDLING:**
+1. Use `check_browser_status` to see what's running
+2. If browser is running but not active, use `bring_chrome_to_front`
+3. If no browser is running, use `run_shell` to open one
+4. Wait a few seconds for the browser to load
+5. Use `read_screen` to see what's actually displayed
+6. Then proceed with the actual task based on what you see
+7. If something fails, try a different approach, don't repeat the same failed action
 
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{

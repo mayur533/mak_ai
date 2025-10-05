@@ -1410,13 +1410,36 @@ class BaseTools:
         try:
             import subprocess
             
-            # Basic coordinate validation - let xdotool handle the rest
+            # Enhanced coordinate validation
             if x < 0 or y < 0:
                 return {
                     "success": False,
                     "error": f"Invalid coordinates: ({x}, {y}) - coordinates cannot be negative",
                     "output": f"Coordinates ({x}, {y}) cannot be negative"
                 }
+            
+            # Check screen resolution to validate coordinates
+            try:
+                screen_info = subprocess.run(["xrandr"], capture_output=True, text=True, timeout=3)
+                if screen_info.returncode == 0:
+                    # Extract screen resolution from xrandr output
+                    lines = screen_info.stdout.split('\n')
+                    for line in lines:
+                        if '*' in line and 'connected' in line:
+                            # Parse resolution like "1920x1080"
+                            import re
+                            resolution = re.search(r'(\d+)x(\d+)', line)
+                            if resolution:
+                                max_x, max_y = int(resolution.group(1)), int(resolution.group(2))
+                                if x > max_x or y > max_y:
+                                    return {
+                                        "success": False,
+                                        "error": f"Coordinates ({x}, {y}) exceed screen resolution ({max_x}x{max_y})",
+                                        "output": f"Coordinates out of screen bounds"
+                                    }
+                                break
+            except Exception as e:
+                self.logger.warning(f"Could not validate screen resolution: {e}")
             
             # Check if xdotool is available
             check_result = self.check_system_dependency("xdotool")
@@ -1428,54 +1451,133 @@ class BaseTools:
                     "instructions": check_result.get('instructions', 'Please install xdotool manually.')
                 }
             
-            # Use xdotool to click at coordinates - fix the command syntax
+            # Use correct xdotool syntax: first move mouse, then click
+            move_cmd = ["xdotool", "mousemove", str(x), str(y)]
+            move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=3)
+            
+            if move_result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"Failed to move mouse: {move_result.stderr}",
+                    "output": f"Could not move mouse to ({x}, {y})"
+                }
+            
+            # Now click at the current mouse position
             if button == "left":
-                cmd = ["xdotool", "click", str(x), str(y)]
+                click_cmd = ["xdotool", "click", "1"]  # Button 1 is left click
+            elif button == "right":
+                click_cmd = ["xdotool", "click", "3"]  # Button 3 is right click
+            elif button == "middle":
+                click_cmd = ["xdotool", "click", "2"]  # Button 2 is middle click
             else:
-                cmd = ["xdotool", "click", "--button", button, str(x), str(y)]
+                click_cmd = ["xdotool", "click", "--button", button, "1"]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=5)
 
-            if result.returncode == 0:
+            if click_result.returncode == 0:
                 return {
                     "success": True,
                     "output": f"Clicked at coordinates ({x}, {y}) with {button} button",
                     "message": f"Successfully clicked at ({x}, {y})"
                 }
             else:
-                # Try alternative click method if the first fails
-                try:
-                    # Move mouse first, then click
-                    move_cmd = ["xdotool", "mousemove", str(x), str(y)]
-                    move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=3)
-                    
-                    if move_result.returncode == 0:
-                        click_cmd = ["xdotool", "click", "1"] if button == "left" else ["xdotool", "click", "--button", button, "1"]
-                        click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=3)
-                        
-                        if click_result.returncode == 0:
-                            return {
-                                "success": True,
-                                "output": f"Clicked at coordinates ({x}, {y}) with {button} button (using move+click method)",
-                                "message": f"Successfully clicked at ({x}, {y})"
-                            }
-                    
-                    return {
-                        "success": False,
-                        "error": f"xdotool failed: {result.stderr}",
-                        "output": f"Failed to click at ({x}, {y}) - coordinates may be invalid or window not accessible"
-                    }
-                except Exception as e:
-                    return {
-                        "success": False,
-                        "error": f"xdotool failed: {result.stderr}",
-                        "output": f"Failed to click at ({x}, {y}) - coordinates may be invalid or window not accessible"
-                    }
+                return {
+                    "success": False,
+                    "error": f"xdotool click failed: {click_result.stderr}",
+                    "output": f"Failed to click at ({x}, {y}) - {click_result.stderr}"
+                }
 
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "Click operation timed out"}
         except Exception as e:
             return {"success": False, "error": f"Error clicking screen: {e}"}
+
+    def bring_chrome_to_front(self) -> Dict[str, Any]:
+        """Bring Chrome browser to the foreground if it's running."""
+        try:
+            import subprocess
+            
+            # Check if Chrome is running
+            check_cmd = ["pgrep", "-f", "chrome"]
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=3)
+            
+            if check_result.returncode == 0 and check_result.stdout.strip():
+                # Chrome is running, bring it to front
+                pid = check_result.stdout.strip().split('\n')[0]
+                
+                # Use wmctrl to bring Chrome window to front
+                wmctrl_cmd = ["wmctrl", "-i", "-a", f"$(wmctrl -l | grep -i chrome | head -1 | cut -d' ' -f1)"]
+                wmctrl_result = subprocess.run(wmctrl_cmd, shell=True, capture_output=True, text=True, timeout=5)
+                
+                if wmctrl_result.returncode == 0:
+                    return {
+                        "success": True,
+                        "output": f"Chrome window brought to foreground (PID: {pid})",
+                        "message": "Chrome is now active"
+                    }
+                else:
+                    # Try alternative method with xdotool
+                    xdotool_cmd = ["xdotool", "search", "--name", "Chrome", "windowactivate"]
+                    xdotool_result = subprocess.run(xdotool_cmd, capture_output=True, text=True, timeout=5)
+                    
+                    if xdotool_result.returncode == 0:
+                        return {
+                            "success": True,
+                            "output": f"Chrome window activated using xdotool (PID: {pid})",
+                            "message": "Chrome is now active"
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "error": "Could not bring Chrome to foreground",
+                            "output": "Chrome is running but could not be activated"
+                        }
+            else:
+                return {
+                    "success": False,
+                    "error": "Chrome is not running",
+                    "output": "No Chrome processes found"
+                }
+                
+        except Exception as e:
+            return {"success": False, "error": f"Error bringing Chrome to front: {e}"}
+
+    def check_browser_status(self) -> Dict[str, Any]:
+        """Check if browser is running and active."""
+        try:
+            import subprocess
+            
+            # Check if Chrome is running
+            chrome_cmd = ["pgrep", "-f", "chrome"]
+            chrome_result = subprocess.run(chrome_cmd, capture_output=True, text=True, timeout=3)
+            chrome_running = chrome_result.returncode == 0 and chrome_result.stdout.strip()
+            
+            # Check if Firefox is running
+            firefox_cmd = ["pgrep", "-f", "firefox"]
+            firefox_result = subprocess.run(firefox_cmd, capture_output=True, text=True, timeout=3)
+            firefox_running = firefox_result.returncode == 0 and firefox_result.stdout.strip()
+            
+            # Get active window title
+            active_window_cmd = ["xdotool", "getactivewindow", "getwindowname"]
+            active_window_result = subprocess.run(active_window_cmd, capture_output=True, text=True, timeout=3)
+            active_window = active_window_result.stdout.strip() if active_window_result.returncode == 0 else ""
+            
+            browser_active = any(browser in active_window.lower() for browser in ["chrome", "firefox", "browser"])
+            
+            return {
+                "success": True,
+                "output": {
+                    "chrome_running": chrome_running,
+                    "firefox_running": firefox_running,
+                    "browser_active": browser_active,
+                    "active_window": active_window,
+                    "any_browser_running": chrome_running or firefox_running
+                },
+                "message": f"Chrome: {'Running' if chrome_running else 'Not running'}, Firefox: {'Running' if firefox_running else 'Not running'}, Active: {active_window}"
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": f"Error checking browser status: {e}"}
     
     def get_mouse_position(self) -> Dict[str, Any]:
         """Get current mouse position using xdotool."""
@@ -1803,13 +1905,24 @@ class BaseTools:
             action_prompt = f"""
 Analyze this screenshot and provide actionable steps to complete this task: "{task_description}"
 
+IMPORTANT: Before suggesting actions, check if:
+1. A browser window is visible and active on screen
+2. The browser is in the foreground (not minimized or behind other windows)
+3. The page has loaded completely (no loading indicators)
+
 Please provide a JSON response with the following structure:
 {{
     "analysis": "Brief description of what you see on the screen",
+    "browser_status": {{
+        "browser_visible": true/false,
+        "browser_active": true/false,
+        "page_loaded": true/false,
+        "recommendations": "Any recommendations about browser state"
+    }},
     "actions": [
         {{
             "step": 1,
-            "action": "click|right_click|double_click|scroll_up|scroll_down|scroll_left|scroll_right|drag|type|key_press",
+            "action": "check_browser_status|bring_chrome_to_front|click|right_click|double_click|scroll_up|scroll_down|scroll_left|scroll_right|drag|type|key_press",
             "coordinates": [x, y],
             "description": "What this action will do",
             "parameters": {{
@@ -1820,10 +1933,12 @@ Please provide a JSON response with the following structure:
         }}
     ],
     "confidence": 0.85,
-    "notes": "Any additional notes or warnings"
+    "notes": "Any additional notes or warnings about browser state or screen elements"
 }}
 
 Available actions:
+- check_browser_status: Check if browser is running and active (use first if unsure)
+- bring_chrome_to_front: Bring Chrome to foreground (use if browser is running but not active)
 - click: Left mouse click at coordinates
 - right_click: Right mouse click at coordinates  
 - double_click: Double click at coordinates
@@ -1835,7 +1950,7 @@ Available actions:
 - type: Type text at coordinates
 - key_press: Press a key combination
 
-Be specific with coordinates and provide clear, actionable steps.
+Be specific with coordinates and provide clear, actionable steps. Always check browser status first if the task involves web interaction.
 """
 
             gemini_client = GeminiClient()
