@@ -1177,6 +1177,233 @@ class BaseTools:
         
         return {"success": True, "results": results}
     
+    def scroll_screen(self, x: int, y: int, direction: str = "up", amount: int = 3) -> Dict[str, Any]:
+        """Scroll at specific screen coordinates using xdotool."""
+        try:
+            import subprocess
+
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for screen scrolling. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+
+            # Move mouse to position first
+            move_cmd = ["xdotool", "mousemove", str(x), str(y)]
+            move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=5)
+            
+            if move_result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"Failed to move mouse: {move_result.stderr}",
+                    "output": f"Could not move mouse to ({x}, {y})"
+                }
+
+            # Perform scroll
+            scroll_cmd = ["xdotool", "click", "--clearmodifiers", "--repeat", str(amount)]
+            if direction == "up":
+                scroll_cmd.extend(["4"])  # Scroll up
+            elif direction == "down":
+                scroll_cmd.extend(["5"])  # Scroll down
+            elif direction == "left":
+                scroll_cmd.extend(["6"])  # Scroll left
+            elif direction == "right":
+                scroll_cmd.extend(["7"])  # Scroll right
+            else:
+                return {
+                    "success": False,
+                    "error": f"Invalid scroll direction: {direction}",
+                    "output": "Valid directions: up, down, left, right"
+                }
+
+            result = subprocess.run(scroll_cmd, capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": f"Scrolled {direction} {amount} times at ({x}, {y})",
+                    "message": f"Successfully scrolled {direction} at ({x}, {y})"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool scroll failed: {result.stderr}",
+                    "output": f"Failed to scroll {direction} at ({x}, {y})"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Scroll operation timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error scrolling screen: {e}"}
+
+    def move_mouse(self, x: int, y: int) -> Dict[str, Any]:
+        """Move mouse to specific coordinates using xdotool."""
+        try:
+            import subprocess
+
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for mouse movement. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+
+            cmd = ["xdotool", "mousemove", str(x), str(y)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": f"Mouse moved to ({x}, {y})",
+                    "message": f"Successfully moved mouse to ({x}, {y})"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool failed: {result.stderr}",
+                    "output": f"Failed to move mouse to ({x}, {y})"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Mouse movement timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error moving mouse: {e}"}
+
+    def drag_mouse(self, x1: int, y1: int, x2: int, y2: int, duration: float = 1.0) -> Dict[str, Any]:
+        """Drag mouse from one point to another using xdotool."""
+        try:
+            import subprocess
+
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for mouse dragging. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+
+            # Move to start position, press button 1, drag to end position, release
+            cmd = [
+                "xdotool", "mousemove", str(x1), str(y1),
+                "mousedown", "1",
+                "mousemove", "--sync", str(x2), str(y2),
+                "mouseup", "1"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": f"Dragged from ({x1}, {y1}) to ({x2}, {y2})",
+                    "message": f"Successfully dragged mouse from ({x1}, {y1}) to ({x2}, {y2})"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool drag failed: {result.stderr}",
+                    "output": f"Failed to drag from ({x1}, {y1}) to ({x2}, {y2})"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Drag operation timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error dragging mouse: {e}"}
+
+    def type_text(self, text: str, x: int = None, y: int = None) -> Dict[str, Any]:
+        """Type text at specific coordinates or current position using xdotool."""
+        try:
+            import subprocess
+
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for text input. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+
+            cmd = ["xdotool", "type", "--clearmodifiers", text]
+            
+            # If coordinates provided, click there first
+            if x is not None and y is not None:
+                click_cmd = ["xdotool", "click", "--clearmodifiers", str(x), str(y)]
+                click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=5)
+                if click_result.returncode != 0:
+                    return {
+                        "success": False,
+                        "error": f"Failed to click before typing: {click_result.stderr}",
+                        "output": f"Could not click at ({x}, {y}) before typing"
+                    }
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+            if result.returncode == 0:
+                location = f" at ({x}, {y})" if x is not None and y is not None else " at current position"
+                return {
+                    "success": True,
+                    "output": f"Typed '{text}'{location}",
+                    "message": f"Successfully typed text{location}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool type failed: {result.stderr}",
+                    "output": f"Failed to type text"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Text input timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error typing text: {e}"}
+
+    def press_key(self, key_combination: str) -> Dict[str, Any]:
+        """Press key combination using xdotool."""
+        try:
+            import subprocess
+
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for key input. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+
+            cmd = ["xdotool", "key", "--clearmodifiers", key_combination]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "output": f"Pressed key combination: {key_combination}",
+                    "message": f"Successfully pressed {key_combination}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"xdotool key failed: {result.stderr}",
+                    "output": f"Failed to press {key_combination}"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Key press timed out"}
+        except Exception as e:
+            return {"success": False, "error": f"Error pressing key: {e}"}
+
     def click_screen(self, x: int, y: int, button: str = "left") -> Dict[str, Any]:
         """Click at specific screen coordinates using xdotool."""
         try:
@@ -1417,17 +1644,26 @@ class BaseTools:
                 "output": f"Please install {package_name} manually"
             }
 
-    def check_system_dependency(self, dependency: str) -> Dict[str, Any]:
+    def check_system_dependency(self, dependency: str = None, dependency_name: str = None) -> Dict[str, Any]:
         """Check if a system dependency is installed and provide installation instructions if not."""
         try:
             import subprocess
             import platform
             import os
 
-            result = subprocess.run(["which", dependency], capture_output=True, text=True)
+            # Handle both parameter names
+            dep_name = dependency or dependency_name
+            if not dep_name:
+                return {
+                    "success": False,
+                    "error": "No dependency name provided",
+                    "output": "Please provide either 'dependency' or 'dependency_name' parameter"
+                }
+
+            result = subprocess.run(["which", dep_name], capture_output=True, text=True)
 
             if result.returncode == 0:
-                version_result = subprocess.run([dependency, "--version"], capture_output=True, text=True)
+                version_result = subprocess.run([dep_name, "--version"], capture_output=True, text=True)
                 version = version_result.stdout.strip() if version_result.returncode == 0 else "Unknown"
 
                 return {
@@ -1435,17 +1671,17 @@ class BaseTools:
                     "installed": True,
                     "path": result.stdout.strip(),
                     "version": version,
-                    "output": f"{dependency} is installed at {result.stdout.strip()}"
+                    "output": f"{dep_name} is installed at {result.stdout.strip()}"
                 }
             else:
                 system = platform.system().lower()
-                instructions = self._get_installation_instructions(dependency, system)
+                instructions = self._get_installation_instructions(dep_name, system)
 
                 return {
                     "success": False,
                     "installed": False,
-                    "error": f"{dependency} is not installed",
-                    "output": f"{dependency} not found. Installation instructions: {instructions}",
+                    "error": f"{dep_name} is not installed",
+                    "output": f"{dep_name} not found. Installation instructions: {instructions}",
                     "instructions": instructions
                 }
 
@@ -1453,7 +1689,7 @@ class BaseTools:
             return {
                 "success": False,
                 "error": f"Error checking dependency: {e}",
-                "output": f"Could not check if {dependency} is installed"
+                "output": f"Could not check if {dep_name} is installed"
             }
 
     def _get_installation_instructions(self, dependency: str, system: str) -> str:
@@ -1480,7 +1716,219 @@ class BaseTools:
             }
         }
 
-        return instructions.get(system, {}).get(dependency, f"Please install {dependency} manually for {system}")
+                return instructions.get(system, {}).get(dependency, f"Please install {dependency} manually for {system}")
+    
+    def analyze_screen_actions(self, task_description: str = "Analyze the screen and provide actionable steps") -> Dict[str, Any]:
+        """Analyze the screen and provide actionable steps with coordinates and operations."""
+        try:
+            import tempfile
+            import os
+            from src.core.gemini_client import GeminiClient
+
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                screenshot_path = temp_file.name
+
+            if os.name == 'nt':  # Windows
+                screenshot_cmd = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::PrimaryScreen.Bounds | ForEach-Object {{ $bounds = $_; $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height; $graphics = [System.Drawing.Graphics]::FromImage($bitmap); $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); $bitmap.Save(\'{screenshot_path}\', [System.Drawing.Imaging.ImageFormat]::Png); $bitmap.Dispose(); $graphics.Dispose() }}"'
+            else:  # Linux/macOS
+                if os.path.exists('/usr/bin/scrot'):
+                    screenshot_cmd = f'scrot "{screenshot_path}"'
+                elif os.path.exists('/usr/bin/gnome-screenshot'):
+                    screenshot_cmd = f'gnome-screenshot -f "{screenshot_path}"'
+                elif os.path.exists('/usr/bin/import'):
+                    screenshot_cmd = f'import -window root "{screenshot_path}"'
+                else:
+                    screenshot_cmd = f'screencapture "{screenshot_path}"'
+
+            screenshot_result = self.run_shell(screenshot_cmd)
+
+            if not screenshot_result.get("success", False):
+                return {
+                    "success": False,
+                    "error": f"Failed to capture screenshot: {screenshot_result.get('error', 'Unknown error')}",
+                    "output": "Screenshot capture failed"
+                }
+
+            if not os.path.exists(screenshot_path) or os.path.getsize(screenshot_path) == 0:
+                return {
+                    "success": False,
+                    "error": "Screenshot file was not created or is empty",
+                    "output": "Screenshot capture failed - no image data"
+                }
+
+            # Create detailed prompt for action analysis
+            action_prompt = f"""
+Analyze this screenshot and provide actionable steps to complete this task: "{task_description}"
+
+Please provide a JSON response with the following structure:
+{{
+    "analysis": "Brief description of what you see on the screen",
+    "actions": [
+        {{
+            "step": 1,
+            "action": "click|right_click|double_click|scroll_up|scroll_down|scroll_left|scroll_right|drag|type|key_press",
+            "coordinates": [x, y],
+            "description": "What this action will do",
+            "parameters": {{
+                "text": "text to type (for type action)",
+                "key": "key to press (for key_press action)",
+                "duration": "drag duration in seconds (for drag action)"
+            }}
+        }}
+    ],
+    "confidence": 0.85,
+    "notes": "Any additional notes or warnings"
+}}
+
+Available actions:
+- click: Left mouse click at coordinates
+- right_click: Right mouse click at coordinates  
+- double_click: Double click at coordinates
+- scroll_up: Scroll up from coordinates
+- scroll_down: Scroll down from coordinates
+- scroll_left: Scroll left from coordinates
+- scroll_right: Scroll right from coordinates
+- drag: Drag from coordinates to another location
+- type: Type text at coordinates
+- key_press: Press a key combination
+
+Be specific with coordinates and provide clear, actionable steps.
+"""
+
+            gemini_client = GeminiClient()
+            analysis_result = gemini_client.analyze_image(screenshot_path, action_prompt)
+
+            try:
+                os.unlink(screenshot_path)
+            except Exception as cleanup_error:
+                self.logger.warning(f"Failed to clean up temporary screenshot: {cleanup_error}")
+
+            if analysis_result:
+                # Extract the text content from the analysis result
+                if isinstance(analysis_result, dict):
+                    analysis_text = analysis_result.get('text', str(analysis_result))
+                else:
+                    analysis_text = str(analysis_result)
+                
+                # Try to parse JSON from the response
+                try:
+                    import json
+                    import re
+                    
+                    # Extract JSON from the response
+                    json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group()
+                        actions_data = json.loads(json_str)
+                        
+                        formatted_output = self._format_action_analysis(actions_data)
+                        
+                        return {
+                            "success": True,
+                            "text": analysis_text,
+                            "output": formatted_output,
+                            "message": "Screen analyzed and actions generated successfully",
+                            "summary": f"Generated {len(actions_data.get('actions', []))} actionable steps",
+                            "actions": actions_data.get('actions', []),
+                            "raw_analysis": analysis_text
+                        }
+                    else:
+                        # If no JSON found, return formatted text
+                        formatted_output = self._format_action_analysis_text(analysis_text)
+                        return {
+                            "success": True,
+                            "text": analysis_text,
+                            "output": formatted_output,
+                            "message": "Screen analyzed but no structured actions found",
+                            "summary": "Analysis completed - manual interpretation required"
+                        }
+                        
+                except json.JSONDecodeError as e:
+                    # If JSON parsing fails, return formatted text
+                    formatted_output = self._format_action_analysis_text(analysis_text)
+                    return {
+                        "success": True,
+                        "text": analysis_text,
+                        "output": formatted_output,
+                        "message": "Screen analyzed but JSON parsing failed",
+                        "summary": "Analysis completed - manual interpretation required"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to analyze screenshot",
+                    "output": "No analysis result returned"
+                }
+
+        except Exception as e:
+            try:
+                if 'screenshot_path' in locals() and os.path.exists(screenshot_path):
+                    os.unlink(screenshot_path)
+            except:
+                pass
+
+            return {
+                "success": False,
+                "error": f"Error analyzing screen actions: {e}",
+                "output": f"Error: {e}"
+            }
+    
+    def _format_action_analysis(self, actions_data: dict) -> str:
+        """Format action analysis data for better readability."""
+        try:
+            analysis = actions_data.get('analysis', 'No analysis provided')
+            actions = actions_data.get('actions', [])
+            confidence = actions_data.get('confidence', 0)
+            notes = actions_data.get('notes', '')
+            
+            formatted_output = f"""🎯 SCREEN ACTION ANALYSIS
+{'='*60}
+
+📋 ANALYSIS: {analysis}
+
+🎬 ACTIONABLE STEPS:
+{'='*60}"""
+            
+            for action in actions:
+                step = action.get('step', '?')
+                action_type = action.get('action', 'unknown')
+                coords = action.get('coordinates', [0, 0])
+                description = action.get('description', 'No description')
+                params = action.get('parameters', {})
+                
+                formatted_output += f"""
+📌 STEP {step}: {action_type.upper()}
+   Coordinates: ({coords[0]}, {coords[1]})
+   Description: {description}"""
+                
+                if params:
+                    formatted_output += "\n   Parameters:"
+                    for key, value in params.items():
+                        formatted_output += f"\n     • {key}: {value}"
+            
+            formatted_output += f"""
+
+📊 CONFIDENCE: {confidence * 100:.0f}%
+
+💡 NOTES: {notes}
+
+{'='*60}
+✅ Action analysis completed successfully"""
+            
+            return formatted_output
+            
+        except Exception as e:
+            return f"Error formatting action analysis: {e}"
+    
+    def _format_action_analysis_text(self, analysis_text: str) -> str:
+        """Format action analysis text when JSON parsing fails."""
+        return f"""🎯 SCREEN ACTION ANALYSIS
+{'='*60}
+
+{analysis_text}
+
+{'='*60}
+✅ Analysis completed - manual interpretation required"""
     
     def _format_screen_analysis(self, analysis_text: str) -> str:
         """Format screen analysis text for better readability."""

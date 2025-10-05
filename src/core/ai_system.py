@@ -369,13 +369,55 @@ class AISystem:
                 is_dynamic=False,
                 func=self.base_tools.install_system_package
             ),
-            Tool(
-                name="check_system_dependency",
-                code="",
-                doc="Check if system dependency is installed and get installation instructions. Usage: check_system_dependency(dependency_name)",
-                is_dynamic=False,
-                func=self.base_tools.check_system_dependency
-            ),
+        Tool(
+            name="check_system_dependency",
+            code="",
+            doc="Check if system dependency is installed and get installation instructions. Usage: check_system_dependency(dependency_name)",
+            is_dynamic=False,
+            func=self.base_tools.check_system_dependency
+        ),
+        Tool(
+            name="analyze_screen_actions",
+            code="",
+            doc="Analyze screen and provide actionable steps with coordinates and operations. Usage: analyze_screen_actions(task_description)",
+            is_dynamic=False,
+            func=self.base_tools.analyze_screen_actions
+        ),
+        Tool(
+            name="scroll_screen",
+            code="",
+            doc="Scroll at specific screen coordinates. Usage: scroll_screen(x, y, direction='up', amount=3)",
+            is_dynamic=False,
+            func=self.base_tools.scroll_screen
+        ),
+        Tool(
+            name="move_mouse",
+            code="",
+            doc="Move mouse to specific coordinates. Usage: move_mouse(x, y)",
+            is_dynamic=False,
+            func=self.base_tools.move_mouse
+        ),
+        Tool(
+            name="drag_mouse",
+            code="",
+            doc="Drag mouse from one point to another. Usage: drag_mouse(x1, y1, x2, y2, duration=1.0)",
+            is_dynamic=False,
+            func=self.base_tools.drag_mouse
+        ),
+        Tool(
+            name="type_text",
+            code="",
+            doc="Type text at specific coordinates or current position. Usage: type_text(text, x=None, y=None)",
+            is_dynamic=False,
+            func=self.base_tools.type_text
+        ),
+        Tool(
+            name="press_key",
+            code="",
+            doc="Press key combination. Usage: press_key(key_combination)",
+            is_dynamic=False,
+            func=self.base_tools.press_key
+        ),
             Tool(
                 name="generate_structured_output",
                 code="",
@@ -776,7 +818,13 @@ Your core process is as follows:
 - Use `find_files` to search for files by pattern (e.g., "*.png", "*.jpg")
 - Use `analyze_image` to analyze any image file you discover
 - Use `read_screen` to capture and analyze the current screen
+- Use `analyze_screen_actions` to get actionable steps with coordinates for completing tasks
 - Use `click_screen` to click at specific screen coordinates (x, y)
+- Use `scroll_screen` to scroll at coordinates (x, y, direction, amount)
+- Use `move_mouse` to move mouse to coordinates (x, y)
+- Use `drag_mouse` to drag from (x1, y1) to (x2, y2)
+- Use `type_text` to type text at coordinates (text, x, y)
+- Use `press_key` to press key combinations
 - Use `get_mouse_position` to get current mouse coordinates
 - Use `install_package` to install Python packages in virtual environment
 - Use `install_system_package` to install system packages using package manager
