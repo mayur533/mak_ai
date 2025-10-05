@@ -310,6 +310,13 @@ class AISystem:
                 func=self.base_tools.run_shell_async
             ),
             Tool(
+                name="interact_with_process",
+                code="",
+                doc="Interact with a running async process. Usage: interact_with_process(process_id, action='status', data=None)",
+                is_dynamic=False,
+                func=self.base_tools.interact_with_process
+            ),
+            Tool(
                 name="create_and_save_tool",
                 code="",
                 doc="Create and register a new tool. Usage: create_and_save_tool(tool_name, tool_code, doc_string)",
@@ -1039,10 +1046,18 @@ Current Status:
 3. If no browser is running, use `run_shell_async` for blocking commands like browsers
 4. Use `run_shell_async` for any command that might block (browsers, GUI apps, etc.)
 5. Use `run_shell` for quick commands that return immediately
-6. Wait a few seconds for the browser to load
-7. Use `read_screen` to see what's actually displayed
-8. Then proceed with the actual task based on what you see
-9. If something fails, try a different approach, don't repeat the same failed action
+6. Use `interact_with_process` to check status, send input, or get output from running processes
+7. Wait a few seconds for the browser to load
+8. Use `read_screen` to see what's actually displayed
+9. Then proceed with the actual task based on what you see
+10. If something fails, try a different approach, don't repeat the same failed action
+
+**ASYNC PROCESS MANAGEMENT:**
+- `run_shell_async(command, timeout=0)` - Start process in background, returns process_id immediately
+- `interact_with_process(process_id, "status")` - Check if process is still running
+- `interact_with_process(process_id, "get_output")` - Get real-time output from process
+- `interact_with_process(process_id, "send_input", data)` - Send input to process
+- `interact_with_process(process_id, "kill")` - Terminate the process
 
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{

@@ -172,28 +172,30 @@ class BaseTools:
 
     def run_shell_async(self, command: str, timeout: int = 300) -> Dict[str, Any]:
         """
-        Execute a shell command in a separate process for blocking commands like browsers.
+        Execute a shell command in a truly non-blocking separate process.
+        Returns immediately and allows live interaction with the process.
         
         Args:
             command: The shell command to execute
-            timeout: Maximum time to wait for command completion
+            timeout: Maximum time to wait for command completion (0 = no timeout)
             
         Returns:
-            Dict with success status and output/error
+            Dict with success status, process info, and interaction methods
         """
         try:
             import subprocess
-            import multiprocessing
-            import queue
             import threading
             import signal
+            import uuid
+            import os
             
             # Validate input
             if not command or not command.strip():
                 return {"success": False, "error": "Empty or invalid command provided"}
             
             command = command.strip()
-            self.logger.info(f"Executing async shell command in separate process: `{command}`")
+            process_id = str(uuid.uuid4())[:8]
+            self.logger.info(f"Starting async process {process_id}: `{command}`")
             
             # Enhanced security checks (same as run_shell)
             dangerous_patterns = [
@@ -234,59 +236,164 @@ class BaseTools:
                 quoted_path = f'"{path}"'
                 command = command.replace(path, quoted_path)
             
-            # Execute command in separate process
-            start_time = time.time()
-            
-            # Use subprocess.Popen for non-blocking execution
+            # Start process in background
             process = subprocess.Popen(
                 command,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
                 text=True,
                 cwd=settings.BASE_DIR,
                 env=os.environ.copy(),
-                preexec_fn=os.setsid  # Create new process group
+                preexec_fn=os.setsid,  # Create new process group
+                bufsize=0  # Unbuffered for real-time interaction
             )
             
-            # Wait for process completion with timeout
-            try:
-                stdout, stderr = process.communicate(timeout=timeout)
-                execution_time = time.time() - start_time
-                
-                # Log execution time
-                self.logger.success(f"Async command completed successfully in {execution_time:.2f}s")
-                
-                # Return result
-                return {
-                    "success": True,
-                    "output": stdout.strip() if stdout.strip() else "Command executed successfully",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": process.returncode,
-                    "execution_time": execution_time
-                }
-                
-            except subprocess.TimeoutExpired:
-                # Kill the entire process group
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    process.wait(timeout=5)  # Give it 5 seconds to terminate gracefully
-                except (subprocess.TimeoutExpired, ProcessLookupError):
-                    # Force kill if it doesn't terminate gracefully
+            # Store process info for later interaction
+            process_info = {
+                "pid": process.pid,
+                "process_id": process_id,
+                "command": command,
+                "start_time": time.time(),
+                "status": "running"
+            }
+            
+            # Store in system context for later access
+            if not hasattr(self.system, 'running_processes'):
+                self.system.running_processes = {}
+            self.system.running_processes[process_id] = {
+                "process": process,
+                "info": process_info
+            }
+            
+            # Start monitoring thread if timeout is specified
+            if timeout > 0:
+                def monitor_process():
                     try:
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass  # Process already dead
+                        process.wait(timeout=timeout)
+                        process_info["status"] = "completed"
+                        self.logger.info(f"Process {process_id} completed successfully")
+                    except subprocess.TimeoutExpired:
+                        process_info["status"] = "timeout"
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                            process.wait(timeout=5)
+                        except (subprocess.TimeoutExpired, ProcessLookupError):
+                            try:
+                                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        self.logger.warning(f"Process {process_id} timed out and was terminated")
+                    except Exception as e:
+                        process_info["status"] = "error"
+                        self.logger.error(f"Process {process_id} error: {e}")
                 
-                return {
-                    "success": False,
-                    "error": f"Command timed out after {timeout} seconds",
-                    "output": f"Command '{command}' timed out and was terminated"
-                }
+                monitor_thread = threading.Thread(target=monitor_process, daemon=True)
+                monitor_thread.start()
+            
+            # Return immediately with process info
+            return {
+                "success": True,
+                "output": f"Process {process_id} started successfully",
+                "process_id": process_id,
+                "pid": process.pid,
+                "status": "running",
+                "command": command,
+                "message": f"Process started in background. Use process_id '{process_id}' for interaction."
+            }
                 
         except Exception as e:
-            return {"success": False, "error": f"Error executing async command: {e}"}
+            return {"success": False, "error": f"Error starting async process: {e}"}
+
+    def interact_with_process(self, process_id: str, action: str = "status", data: str = None) -> Dict[str, Any]:
+        """
+        Interact with a running async process.
+        
+        Args:
+            process_id: The process ID returned by run_shell_async
+            action: Action to perform (status, kill, send_input, get_output)
+            data: Data to send (for send_input action)
+            
+        Returns:
+            Dict with interaction result
+        """
+        try:
+            import signal
+            import os
+            
+            if not hasattr(self.system, 'running_processes'):
+                return {"success": False, "error": "No running processes found"}
+            
+            if process_id not in self.system.running_processes:
+                return {"success": False, "error": f"Process {process_id} not found"}
+            
+            process_data = self.system.running_processes[process_id]
+            process = process_data["process"]
+            info = process_data["info"]
+            
+            if action == "status":
+                # Check if process is still running
+                if process.poll() is None:
+                    info["status"] = "running"
+                    return {
+                        "success": True,
+                        "status": "running",
+                        "pid": process.pid,
+                        "uptime": time.time() - info["start_time"],
+                        "command": info["command"]
+                    }
+                else:
+                    info["status"] = "completed"
+                    return {
+                        "success": True,
+                        "status": "completed",
+                        "returncode": process.returncode,
+                        "uptime": time.time() - info["start_time"]
+                    }
+            
+            elif action == "kill":
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    process.wait(timeout=5)
+                    info["status"] = "killed"
+                    return {"success": True, "message": f"Process {process_id} terminated gracefully"}
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        info["status"] = "force_killed"
+                        return {"success": True, "message": f"Process {process_id} force killed"}
+                    except ProcessLookupError:
+                        info["status"] = "already_dead"
+                        return {"success": True, "message": f"Process {process_id} was already dead"}
+            
+            elif action == "send_input":
+                if data is None:
+                    return {"success": False, "error": "No data provided for send_input"}
+                try:
+                    process.stdin.write(data + "\n")
+                    process.stdin.flush()
+                    return {"success": True, "message": f"Sent input to process {process_id}"}
+                except Exception as e:
+                    return {"success": False, "error": f"Failed to send input: {e}"}
+            
+            elif action == "get_output":
+                try:
+                    # Non-blocking read
+                    import select
+                    if select.select([process.stdout], [], [], 0.1)[0]:
+                        output = process.stdout.read()
+                        return {"success": True, "output": output}
+                    else:
+                        return {"success": True, "output": "", "message": "No output available"}
+                except Exception as e:
+                    return {"success": False, "error": f"Failed to read output: {e}"}
+            
+            else:
+                return {"success": False, "error": f"Unknown action: {action}"}
+                
+        except Exception as e:
+            return {"success": False, "error": f"Error interacting with process: {e}"}
     
     
     def install_package(self, package_name: str) -> Dict[str, Any]:
