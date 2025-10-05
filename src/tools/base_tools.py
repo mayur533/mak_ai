@@ -87,6 +87,7 @@ class BaseTools:
                 quoted_path = f'"{path}"'
                 command = command.replace(path, quoted_path)
             
+            
             # Log command execution (debug level only)
             self.logger.debug(f"🔧 Executing: {command}")
             
@@ -1405,17 +1406,36 @@ class BaseTools:
             return {"success": False, "error": f"Error pressing key: {e}"}
 
     def click_screen(self, x: int, y: int, button: str = "left") -> Dict[str, Any]:
-        """Click at specific screen coordinates using xdotool."""
+        """Click at specific screen coordinates using xdotool with validation."""
         try:
             import subprocess
             
-            # Use xdotool to click at coordinates
-            cmd = ["xdotool", "click", "--clearmodifiers", str(x), str(y)]
-            if button != "left":
-                cmd.extend(["--button", button])
+            # Basic coordinate validation - let xdotool handle the rest
+            if x < 0 or y < 0:
+                return {
+                    "success": False,
+                    "error": f"Invalid coordinates: ({x}, {y}) - coordinates cannot be negative",
+                    "output": f"Coordinates ({x}, {y}) cannot be negative"
+                }
             
+            # Check if xdotool is available
+            check_result = self.check_system_dependency("xdotool")
+            if not check_result.get("installed", False):
+                return {
+                    "success": False,
+                    "error": "xdotool not installed",
+                    "output": f"xdotool is required for screen clicking. {check_result.get('instructions', 'Please install xdotool manually.')}",
+                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
+                }
+            
+            # Use xdotool to click at coordinates - fix the command syntax
+            if button == "left":
+                cmd = ["xdotool", "click", str(x), str(y)]
+            else:
+                cmd = ["xdotool", "click", "--button", button, str(x), str(y)]
+
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-            
+
             if result.returncode == 0:
                 return {
                     "success": True,
@@ -1423,12 +1443,35 @@ class BaseTools:
                     "message": f"Successfully clicked at ({x}, {y})"
                 }
             else:
-                return {
-                    "success": False,
-                    "error": f"xdotool failed: {result.stderr}",
-                    "output": f"Failed to click at ({x}, {y})"
-                }
-                
+                # Try alternative click method if the first fails
+                try:
+                    # Move mouse first, then click
+                    move_cmd = ["xdotool", "mousemove", str(x), str(y)]
+                    move_result = subprocess.run(move_cmd, capture_output=True, text=True, timeout=3)
+                    
+                    if move_result.returncode == 0:
+                        click_cmd = ["xdotool", "click", "1"] if button == "left" else ["xdotool", "click", "--button", button, "1"]
+                        click_result = subprocess.run(click_cmd, capture_output=True, text=True, timeout=3)
+                        
+                        if click_result.returncode == 0:
+                            return {
+                                "success": True,
+                                "output": f"Clicked at coordinates ({x}, {y}) with {button} button (using move+click method)",
+                                "message": f"Successfully clicked at ({x}, {y})"
+                            }
+                    
+                    return {
+                        "success": False,
+                        "error": f"xdotool failed: {result.stderr}",
+                        "output": f"Failed to click at ({x}, {y}) - coordinates may be invalid or window not accessible"
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"xdotool failed: {result.stderr}",
+                        "output": f"Failed to click at ({x}, {y}) - coordinates may be invalid or window not accessible"
+                    }
+
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "Click operation timed out"}
         except Exception as e:
@@ -1930,122 +1973,10 @@ Be specific with coordinates and provide clear, actionable steps.
 {'='*60}
 ✅ Analysis completed - manual interpretation required"""
     
-    def bring_window_to_front(self, window_name: str = "chrome") -> Dict[str, Any]:
-        """Bring a window to the front using xdotool."""
-        try:
-            import subprocess
 
-            # Check if xdotool is available
-            check_result = self.check_system_dependency("xdotool")
-            if not check_result.get("installed", False):
-                return {
-                    "success": False,
-                    "error": "xdotool not installed",
-                    "output": f"xdotool is required for window management. {check_result.get('instructions', 'Please install xdotool manually.')}",
-                    "instructions": check_result.get('instructions', 'Please install xdotool manually.')
-                }
-
-            # Try different methods to bring window to front
-            methods = [
-                f"xdotool search --name '{window_name}' windowactivate",
-                f"xdotool search --class '{window_name}' windowactivate",
-                f"xdotool search --classname '{window_name}' windowactivate"
-            ]
-            
-            for method in methods:
-                cmd = method.split()
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    return {
-                        "success": True,
-                        "output": f"Brought {window_name} window to front",
-                        "message": f"Successfully activated {window_name} window"
-                    }
-            
-            # If specific search fails, try to activate any Chrome window
-            if window_name.lower() in ['chrome', 'google-chrome']:
-                chrome_cmd = ["xdotool", "search", "--class", "google-chrome-stable", "windowactivate"]
-                result = subprocess.run(chrome_cmd, capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    return {
-                        "success": True,
-                        "output": "Brought Chrome window to front",
-                        "message": "Successfully activated Chrome window"
-                    }
-            
-            return {
-                "success": False,
-                "error": f"Could not find window: {window_name}",
-                "output": f"Window '{window_name}' not found or could not be activated"
-            }
-
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Window activation timed out"}
-        except Exception as e:
-            return {"success": False, "error": f"Error bringing window to front: {e}"}
     
-    def wait_for_element(self, description: str, timeout: int = 10) -> Dict[str, Any]:
-        """Wait for an element to appear on screen by taking screenshots and analyzing."""
-        try:
-            import time
-            from src.core.gemini_client import GeminiClient
-            
-            start_time = time.time()
-            
-            while time.time() - start_time < timeout:
-                # Take screenshot
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
-                    screenshot_path = temp_file.name
-
-                if os.name == 'nt':  # Windows
-                    screenshot_cmd = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::PrimaryScreen.Bounds | ForEach-Object {{ $bounds = $_; $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height; $graphics = [System.Drawing.Graphics]::FromImage($bitmap); $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); $bitmap.Save(\'{screenshot_path}\', [System.Drawing.Imaging.ImageFormat]::Png); $bitmap.Dispose(); $graphics.Dispose() }}"'
-                else:  # Linux/macOS
-                    if os.path.exists('/usr/bin/scrot'):
-                        screenshot_cmd = f'scrot "{screenshot_path}"'
-                    elif os.path.exists('/usr/bin/gnome-screenshot'):
-                        screenshot_cmd = f'gnome-screenshot -f "{screenshot_path}"'
-                    elif os.path.exists('/usr/bin/import'):
-                        screenshot_cmd = f'import -window root "{screenshot_path}"'
-                    else:
-                        screenshot_cmd = f'screencapture "{screenshot_path}"'
-
-                screenshot_result = self.run_shell(screenshot_cmd)
-                
-                if screenshot_result.get("success", False) and os.path.exists(screenshot_path):
-                    # Analyze if element is present
-                    gemini_client = GeminiClient()
-                    analysis_prompt = f"Is there a {description} visible on this screen? Answer with just 'YES' or 'NO'."
-                    analysis_result = gemini_client.analyze_image(screenshot_path, analysis_prompt)
-                    
-                    # Clean up screenshot
-                    try:
-                        os.unlink(screenshot_path)
-                    except:
-                        pass
-                    
-                    if analysis_result and isinstance(analysis_result, dict):
-                        response_text = analysis_result.get('text', '').strip().upper()
-                        if 'YES' in response_text:
-                            return {
-                                "success": True,
-                                "output": f"Found {description} after {time.time() - start_time:.1f} seconds",
-                                "message": f"Element '{description}' is now visible"
-                            }
-                
-                time.sleep(1)  # Wait 1 second before checking again
-            
-            return {
-                "success": False,
-                "error": f"Timeout waiting for {description}",
-                "output": f"Element '{description}' did not appear within {timeout} seconds"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Error waiting for element: {e}",
-                "output": f"Failed to wait for {description}"
-            }
+    
+    
     
     def _format_screen_analysis(self, analysis_text: str) -> str:
         """Format screen analysis text for better readability."""

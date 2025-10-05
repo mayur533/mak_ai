@@ -418,20 +418,6 @@ class AISystem:
             is_dynamic=False,
             func=self.base_tools.press_key
         ),
-        Tool(
-            name="bring_window_to_front",
-            code="",
-            doc="Bring a window to the front. Usage: bring_window_to_front(window_name)",
-            is_dynamic=False,
-            func=self.base_tools.bring_window_to_front
-        ),
-        Tool(
-            name="wait_for_element",
-            code="",
-            doc="Wait for an element to appear on screen. Usage: wait_for_element(description, timeout=10)",
-            is_dynamic=False,
-            func=self.base_tools.wait_for_element
-        ),
             Tool(
                 name="generate_structured_output",
                 code="",
@@ -840,8 +826,7 @@ Your core process is as follows:
 - Use `type_text` to type text at coordinates (text, x, y)
 - Use `press_key` to press key combinations
 - Use `get_mouse_position` to get current mouse coordinates
-- Use `bring_window_to_front` to bring windows to foreground
-- Use `wait_for_element` to wait for elements to appear on screen
+- Use `run_shell` to execute system commands and open applications
 - Use `install_package` to install Python packages in virtual environment
 - Use `install_system_package` to install system packages using package manager
 - Use `check_system_dependency` to check if system tools are installed and get installation instructions
@@ -929,6 +914,20 @@ Current Status:
 - If the last step failed, analyze the error and create a plan to fix it
 - Never repeat the same failed step - always try a different approach
 - Use the execution history to understand what has been tried before
+
+**INTELLIGENT DYNAMIC WORKFLOW:**
+- Use `run_shell` to execute system commands and open applications
+- For web tasks: use `run_shell` to open browsers with URLs
+- Use `read_screen` to see what's actually on screen
+- NEVER get stuck in loops - if a tool fails 2-3 times, try a completely different approach
+- Always adapt to what's actually present, not what you assume should be there
+
+**SMART COMMAND HANDLING:**
+1. Use `run_shell` to execute the appropriate system command
+2. Wait a few seconds for the command to complete
+3. Use `read_screen` to see what's actually displayed
+4. Then proceed with the actual task based on what you see
+5. If something fails, try a different approach, don't repeat the same failed action
 
 Your plan MUST be a JSON object with a single step, using the following structure:
 {{
