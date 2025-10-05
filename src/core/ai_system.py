@@ -418,6 +418,20 @@ class AISystem:
             is_dynamic=False,
             func=self.base_tools.press_key
         ),
+        Tool(
+            name="bring_window_to_front",
+            code="",
+            doc="Bring a window to the front. Usage: bring_window_to_front(window_name)",
+            is_dynamic=False,
+            func=self.base_tools.bring_window_to_front
+        ),
+        Tool(
+            name="wait_for_element",
+            code="",
+            doc="Wait for an element to appear on screen. Usage: wait_for_element(description, timeout=10)",
+            is_dynamic=False,
+            func=self.base_tools.wait_for_element
+        ),
             Tool(
                 name="generate_structured_output",
                 code="",
@@ -826,6 +840,8 @@ Your core process is as follows:
 - Use `type_text` to type text at coordinates (text, x, y)
 - Use `press_key` to press key combinations
 - Use `get_mouse_position` to get current mouse coordinates
+- Use `bring_window_to_front` to bring windows to foreground
+- Use `wait_for_element` to wait for elements to appear on screen
 - Use `install_package` to install Python packages in virtual environment
 - Use `install_system_package` to install system packages using package manager
 - Use `check_system_dependency` to check if system tools are installed and get installation instructions
