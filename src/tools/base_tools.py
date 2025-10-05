@@ -170,9 +170,9 @@ class BaseTools:
             self.logger.error(error_msg, exc_info=True)
             return {"success": False, "error": error_msg, "command": command}
 
-    async def run_shell_async(self, command: str, timeout: int = 300) -> Dict[str, Any]:
+    def run_shell_async(self, command: str, timeout: int = 300) -> Dict[str, Any]:
         """
-        Execute a shell command asynchronously for blocking commands like browsers.
+        Execute a shell command in a separate process for blocking commands like browsers.
         
         Args:
             command: The shell command to execute
@@ -182,15 +182,18 @@ class BaseTools:
             Dict with success status and output/error
         """
         try:
-            import asyncio
             import subprocess
+            import multiprocessing
+            import queue
+            import threading
+            import signal
             
             # Validate input
             if not command or not command.strip():
                 return {"success": False, "error": "Empty or invalid command provided"}
             
             command = command.strip()
-            self.logger.info(f"Executing async shell command: `{command}`")
+            self.logger.info(f"Executing async shell command in separate process: `{command}`")
             
             # Enhanced security checks (same as run_shell)
             dangerous_patterns = [
@@ -231,30 +234,25 @@ class BaseTools:
                 quoted_path = f'"{path}"'
                 command = command.replace(path, quoted_path)
             
-            # Execute command asynchronously
+            # Execute command in separate process
             start_time = time.time()
             
-            # Use asyncio.create_subprocess_shell for async execution
-            process = await asyncio.create_subprocess_shell(
+            # Use subprocess.Popen for non-blocking execution
+            process = subprocess.Popen(
                 command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
                 cwd=settings.BASE_DIR,
-                env=os.environ.copy()
+                env=os.environ.copy(),
+                preexec_fn=os.setsid  # Create new process group
             )
             
+            # Wait for process completion with timeout
             try:
-                # Wait for process completion with timeout
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), 
-                    timeout=timeout
-                )
-                
+                stdout, stderr = process.communicate(timeout=timeout)
                 execution_time = time.time() - start_time
-                
-                # Decode output
-                stdout_text = stdout.decode('utf-8', errors='ignore') if stdout else ""
-                stderr_text = stderr.decode('utf-8', errors='ignore') if stderr else ""
                 
                 # Log execution time
                 self.logger.success(f"Async command completed successfully in {execution_time:.2f}s")
@@ -262,21 +260,29 @@ class BaseTools:
                 # Return result
                 return {
                     "success": True,
-                    "output": stdout_text.strip() if stdout_text.strip() else "Command executed successfully",
-                    "stdout": stdout_text,
-                    "stderr": stderr_text,
+                    "output": stdout.strip() if stdout.strip() else "Command executed successfully",
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "returncode": process.returncode,
                     "execution_time": execution_time
                 }
                 
-            except asyncio.TimeoutError:
-                # Kill the process if it times out
-                process.kill()
-                await process.wait()
+            except subprocess.TimeoutExpired:
+                # Kill the entire process group
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    process.wait(timeout=5)  # Give it 5 seconds to terminate gracefully
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    # Force kill if it doesn't terminate gracefully
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # Process already dead
+                
                 return {
                     "success": False,
                     "error": f"Command timed out after {timeout} seconds",
-                    "output": f"Command '{command}' timed out"
+                    "output": f"Command '{command}' timed out and was terminated"
                 }
                 
         except Exception as e:
