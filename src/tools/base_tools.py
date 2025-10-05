@@ -1299,12 +1299,18 @@ class BaseTools:
                 self.logger.warning(f"Failed to clean up temporary screenshot: {cleanup_error}")
             
             if analysis_result:
+                # Extract the text content from the analysis result
+                if isinstance(analysis_result, dict):
+                    analysis_text = analysis_result.get('text', str(analysis_result))
+                else:
+                    analysis_text = str(analysis_result)
+                
                 # Format the analysis result for better readability
-                formatted_output = self._format_screen_analysis(analysis_result)
+                formatted_output = self._format_screen_analysis(analysis_text)
                 
                 return {
                     "success": True,
-                    "text": analysis_result,
+                    "text": analysis_text,
                     "output": formatted_output,
                     "message": "Screen captured and analyzed successfully"
                 }
@@ -1483,25 +1489,26 @@ class BaseTools:
             formatted_lines = []
             
             for line in lines:
+                original_line = line
                 line = line.strip()
                 if not line:
                     formatted_lines.append("")
                     continue
                 
                 # Format headers and subheaders
-                if line.startswith('**') and line.endswith('**'):
-                    # Main header
+                if line.startswith('**') and line.endswith('**') and '**' not in line[2:-2]:
+                    # Main header (bold text)
                     header_text = line[2:-2]
                     formatted_lines.append(f"\n{'='*60}")
                     formatted_lines.append(f"📋 {header_text.upper()}")
                     formatted_lines.append(f"{'='*60}")
                 elif line.startswith('*   **') and line.endswith('**'):
-                    # Subheader
+                    # Subheader with bullet
                     subheader_text = line[6:-2]
                     formatted_lines.append(f"\n🔹 {subheader_text}")
                     formatted_lines.append("-" * 40)
                 elif line.startswith('*   '):
-                    # Bullet point
+                    # Regular bullet point
                     bullet_text = line[4:]
                     formatted_lines.append(f"  • {bullet_text}")
                 elif line.startswith('1.  **') and line.endswith('**'):
@@ -1516,34 +1523,55 @@ class BaseTools:
                     # Numbered item with bold
                     item_text = line[6:-2]
                     formatted_lines.append(f"\n📌 {item_text}")
+                elif line.startswith('4.  **') and line.endswith('**'):
+                    # Numbered item with bold
+                    item_text = line[6:-2]
+                    formatted_lines.append(f"\n📌 {item_text}")
+                elif line.startswith('5.  **') and line.endswith('**'):
+                    # Numbered item with bold
+                    item_text = line[6:-2]
+                    formatted_lines.append(f"\n📌 {item_text}")
+                elif line.startswith('    *   '):
+                    # Sub-bullet point
+                    sub_bullet_text = line[8:]
+                    formatted_lines.append(f"    ◦ {sub_bullet_text}")
+                elif line.startswith('    *   **') and line.endswith('**'):
+                    # Sub-bullet with bold
+                    sub_bullet_text = line[10:-2]
+                    formatted_lines.append(f"    ◦ {sub_bullet_text}")
+                elif line.startswith('    *   '):
+                    # Sub-bullet point (alternative format)
+                    sub_bullet_text = line[8:]
+                    formatted_lines.append(f"    ◦ {sub_bullet_text}")
                 else:
-                    # Regular text
-                    formatted_lines.append(f"  {line}")
+                    # Regular text - preserve original indentation
+                    if original_line.startswith('    '):
+                        formatted_lines.append(f"    {line}")
+                    elif original_line.startswith('  '):
+                        formatted_lines.append(f"  {line}")
+                    else:
+                        formatted_lines.append(f"  {line}")
             
             # Join all lines and add some spacing
             formatted_text = "\n".join(formatted_lines)
             
             # Add a header and footer
-            final_output = f"""
-🖥️  SCREEN ANALYSIS REPORT
+            final_output = f"""🖥️  SCREEN ANALYSIS REPORT
 {'='*60}
 
 {formatted_text}
 
 {'='*60}
-✅ Analysis completed successfully
-"""
+✅ Analysis completed successfully"""
             
-            return final_output.strip()
+            return final_output
             
         except Exception as e:
             # If formatting fails, return the original text with a simple header
-            return f"""
-🖥️  SCREEN ANALYSIS
+            return f"""🖥️  SCREEN ANALYSIS
 {'='*50}
 
 {analysis_text}
 
 {'='*50}
-✅ Analysis completed
-"""
+✅ Analysis completed"""
