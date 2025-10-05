@@ -27,6 +27,8 @@ from src.tools.voice_tools import VoiceTools
 from src.core.context_manager import ContextManager
 from src.tools.google_search import GoogleSearchTool
 from src.core.gemini_client import GeminiClient
+from src.monitoring import metrics_collector, record_request_metric, record_tool_metric
+from src.api import start_health_server
 
 
 class AISystem:
@@ -74,6 +76,15 @@ class AISystem:
         self._register_core_tools()
         self._load_tools_from_files()
         self._get_initial_system_details()
+        
+        # Start health monitoring server
+        self.health_server = None
+        if settings.DEBUG_MODE or getattr(settings, 'ENABLE_HEALTH_SERVER', True):
+            try:
+                self.health_server = start_health_server(self)
+                self.logger.info("Health monitoring server started")
+            except Exception as e:
+                self.logger.warning(f"Failed to start health server: {e}")
         
         self.logger.success("AI System initialized successfully")
     
@@ -946,19 +957,27 @@ Always return a valid JSON object.
         return prompt_template
     
     def process_request(self, user_input: str):
-        """Process a user request."""
-        self.context["initial_goal"] = user_input
-        self.context["status"] = f"Initial user request: {user_input}"
-        self.context["conversation_history"].append({"user": user_input, "ai": ""})
+        """Process a user request with monitoring and error handling."""
+        start_time = time.time()
+        success = False
+        error_type = None
         
-        # Add to context manager
-        self.context_manager.add_context_entry("user_request", user_input)
-        
-        # Reset execution history for new task
-        self.context["execution_history"].clear()
-        
-        self.logger.debug(f"Processing Request: {user_input}")
-        print(f"\n🔄 Processing: {user_input}")
+        try:
+            self.context["initial_goal"] = user_input
+            self.context["status"] = f"Initial user request: {user_input}"
+            self.context["conversation_history"].append({"user": user_input, "ai": ""})
+            
+            # Add to context manager
+            self.context_manager.add_context_entry("user_request", user_input)
+            
+            # Reset execution history for new task
+            self.context["execution_history"].clear()
+            
+            # Record request start
+            metrics_collector.increment_counter('requests_started')
+            
+            self.logger.debug(f"Processing Request: {user_input}")
+            print(f"\n🔄 Processing: {user_input}")
         
         while True:
             prompt = self._construct_prompt()
@@ -982,37 +1001,121 @@ Always return a valid JSON object.
             
             # Execute plan
             if self._execute_plan(plan_data):
+                success = True
                 break
+                
+        except Exception as e:
+            error_type = type(e).__name__
+            self.logger.error(f"Error processing request: {e}")
+            success = False
+            
+        finally:
+            # Record metrics
+            duration = time.time() - start_time
+            record_request_metric(duration, success, error_type)
+            
+            if success:
+                metrics_collector.increment_counter('requests_completed')
+            else:
+                metrics_collector.increment_counter('requests_failed')
     
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
-        """Parse AI response and extract plan."""
+        """Parse AI response and extract plan with comprehensive validation."""
+        plan_data = None
+        
         # Try to extract JSON from markdown code block
         json_match = re.search(r'```json\n(.*?)\n```', response_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
             try:
-                return json.loads(json_str)
+                plan_data = json.loads(json_str)
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse JSON from markdown: {e}")
         
-        # Try to parse entire response as JSON
+        # Try to parse entire response as JSON if markdown parsing failed
+        if not plan_data:
+            try:
+                plan_data = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to parse JSON: {e}")
+                return None
+        
+        # Comprehensive plan validation
+        if plan_data:
+            validation_result = self._validate_plan(plan_data)
+            if not validation_result["valid"]:
+                self.logger.error(f"Plan validation failed: {validation_result['error']}")
+                return None
+        
+        return plan_data
+    
+    def _validate_plan(self, plan_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Comprehensive plan validation."""
         try:
-            return json.loads(response_text)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse JSON: {e}")
-            return None
+            # Check if plan exists and is a list
+            if 'plan' not in plan_data:
+                return {"valid": False, "error": "Missing 'plan' field"}
+            
+            if not isinstance(plan_data['plan'], list):
+                return {"valid": False, "error": "'plan' must be an array"}
+            
+            if len(plan_data['plan']) == 0:
+                return {"valid": False, "error": "Plan cannot be empty"}
+            
+            # Validate each step in the plan
+            for i, step in enumerate(plan_data['plan']):
+                if not isinstance(step, dict):
+                    return {"valid": False, "error": f"Step {i+1} must be an object"}
+                
+                # Check required fields
+                required_fields = ['step', 'action', 'args']
+                for field in required_fields:
+                    if field not in step:
+                        return {"valid": False, "error": f"Step {i+1} missing required field: {field}"}
+                
+                # Validate action field
+                if not isinstance(step['action'], str) or not step['action'].strip():
+                    return {"valid": False, "error": f"Step {i+1} action must be a non-empty string"}
+                
+                # Validate args field
+                if not isinstance(step['args'], dict):
+                    return {"valid": False, "error": f"Step {i+1} args must be an object"}
+                
+                # Check if tool exists
+                tool_name = step['action']
+                if not self.tool_manager.tool_exists(tool_name):
+                    return {"valid": False, "error": f"Step {i+1} references unknown tool: {tool_name}"}
+            
+            # Validate comment field if present
+            if 'comment' in plan_data and not isinstance(plan_data['comment'], str):
+                return {"valid": False, "error": "Comment must be a string"}
+            
+            return {"valid": True, "error": None}
+            
+        except Exception as e:
+            return {"valid": False, "error": f"Validation error: {e}"}
     
     def _execute_plan(self, plan_data: Dict[str, Any]) -> bool:
-        """Execute a plan step with enhanced context management."""
-        plan = plan_data.get("plan")
-        if not isinstance(plan, list) or not plan:
-            self.logger.error("Invalid plan structure")
-            return True
-        
-        step_data = plan[0]
-        action = step_data.get("action")
-        args = step_data.get("args", {})
-        comment = plan_data.get("comment", "No comment provided")
+        """Execute a plan step with enhanced error handling and reliability."""
+        try:
+            plan = plan_data.get("plan")
+            if not isinstance(plan, list) or not plan:
+                self.logger.error("Invalid plan structure")
+                return True
+            
+            step_data = plan[0]
+            action = step_data.get("action")
+            args = step_data.get("args", {})
+            comment = plan_data.get("comment", "No comment provided")
+            
+            # Validate step data before execution
+            if not action or not isinstance(action, str):
+                self.logger.error("Invalid action in plan step")
+                return True
+                
+            if not isinstance(args, dict):
+                self.logger.error("Invalid args in plan step")
+                return True
         
         self.logger.step(1, 1, comment)
         
@@ -1041,12 +1144,73 @@ Always return a valid JSON object.
         
         tool = self.tool_manager.tools[action]
         
-        try:
-            self.tool_manager.update_tool_usage(action)
-            self.logger.debug(f"🔧 Executing tool: {action}")
-            self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
-            
-            result = tool.func(**args)
+        # Execute tool with retry logic and comprehensive error handling
+        max_retries = 3
+        retry_delay = 1.0
+        tool_start_time = time.time()
+        
+        for attempt in range(max_retries):
+            try:
+                self.tool_manager.update_tool_usage(action)
+                self.logger.debug(f"🔧 Executing tool: {action} (attempt {attempt + 1}/{max_retries})")
+                self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
+                
+                # Validate tool function exists
+                if not hasattr(tool, 'func') or not callable(tool.func):
+                    error_msg = f"Tool '{action}' has no callable function"
+                    self.logger.error(error_msg)
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                
+                result = tool.func(**args)
+                
+                # Record tool execution metrics
+                tool_duration = time.time() - tool_start_time
+                tool_success = result.get("success", False) if isinstance(result, dict) else False
+                record_tool_metric(action, tool_duration, tool_success)
+                
+                # Validate result structure
+                if not isinstance(result, dict):
+                    error_msg = f"Tool '{action}' returned invalid result type: {type(result)}"
+                    self.logger.error(error_msg)
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        self.context["status"] = f"Tool execution failed: {error_msg}"
+                        self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                        return False
+                
+                break  # Success, exit retry loop
+                
+            except TypeError as e:
+                error_msg = f"Tool '{action}' argument error: {e}"
+                self.logger.error(error_msg)
+                if "unexpected keyword argument" in str(e):
+                    # Don't retry argument errors
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                elif attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
+                    
+            except Exception as e:
+                error_msg = f"Tool '{action}' execution error: {e}"
+                self.logger.error(error_msg)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    self.context["status"] = f"Tool execution failed: {error_msg}"
+                    self.execution_history.log_execution(step_identifier, comment, "failed", error_msg)
+                    return False
             
             if result.get("success"):
                 self.logger.debug(f"✅ Tool '{action}' completed successfully")
@@ -1234,11 +1398,17 @@ Always return a valid JSON object.
     def shutdown(self):
         """Shutdown the AI system and clean up resources."""
         self.logger.info("Shutting down AI system...")
+        self.active = False
+        
+        # Stop health server
+        if self.health_server:
+            self.health_server.stop()
+            self.logger.info("Health server stopped")
+        
         self.memory_manager.close()
         self.tool_manager.close()
         self.execution_history.close()
         self.context_manager.cleanup_old_projects()
-        self.active = False
         self.logger.success("AI system shutdown complete")
     
     def _attempt_error_resolution(self, tool_name: str, args: Dict[str, Any], error_msg: str, step_identifier: str, comment: str) -> bool:
