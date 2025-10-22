@@ -42,7 +42,6 @@ ttkbootstrap>=1.10.1
 customtkinter>=5.2.0
 
 # Database and storage
-sqlite3
 sqlalchemy>=2.0.0
 alembic>=1.12.0
 

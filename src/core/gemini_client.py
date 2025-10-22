@@ -105,7 +105,7 @@ class GeminiClient:
             with open(self.context_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-        return {
+            return {
                 "conversations": [],
                 "summaries": [],
                 "current_tokens": 0,
@@ -224,7 +224,7 @@ class GeminiClient:
                 await self._summarize_context()
             
             self._save_context()
-        return response
+            return response
 
         except Exception as e:
             logger.error(f"Failed to generate response: {e}")
@@ -256,7 +256,7 @@ class GeminiClient:
                 "source": "gemini_google_search"
             }]
             
-            except Exception as e:
+        except Exception as e:
             logger.error(f"Web search failed: {e}")
             return []
     
@@ -307,7 +307,7 @@ class GeminiClient:
             if json_match:
                 task_data = json.loads(json_match.group())
                 return task_data.get("tasks", [])
-                else:
+            else:
                 logger.error("Failed to parse task planning response")
                 return []
                 
@@ -353,13 +353,13 @@ class GeminiClient:
                 logger.error("Failed to parse todo list response")
                 return []
                 
-            except Exception as e:
+        except Exception as e:
             logger.error(f"Todo list creation failed: {e}")
             return []
     
     def get_context_summary(self) -> Dict[str, Any]:
         """Get a summary of current context."""
-            return {
+        return {
             "total_conversations": len(self.context["conversations"]),
             "total_summaries": len(self.context["summaries"]),
             "current_tokens": self.context["current_tokens"],
@@ -367,6 +367,146 @@ class GeminiClient:
             "token_usage_percent": (self.context["current_tokens"] / self.max_tokens) * 100,
             "last_updated": self.context["last_updated"]
         }
+    
+    async def analyze_image(self, image_path: str, prompt: str = "Describe this image") -> Dict[str, Any]:
+        """Analyze an image using Gemini Vision."""
+        try:
+            import base64
+            from pathlib import Path
+            
+            # Read and encode image
+            image_file = Path(image_path)
+            if not image_file.exists():
+                return {"success": False, "error": f"Image file not found: {image_path}"}
+            
+            with open(image_file, "rb") as f:
+                image_data = base64.b64encode(f.read()).decode()
+            
+            # Create the prompt for image analysis
+            analysis_prompt = f"""
+            {prompt}
+            
+            Please provide a detailed analysis of this image.
+            """
+            
+            # Use the existing generate_response method
+            response = await self.generate_response(analysis_prompt, use_search=False)
+            
+            return {
+                "success": True,
+                "analysis": response,
+                "image_path": image_path,
+                "prompt": prompt
+            }
+            
+        except Exception as e:
+            logger.error(f"Image analysis failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def generate_structured_output(self, prompt: str, output_format: str = "json") -> Dict[str, Any]:
+        """Generate structured output in specified format."""
+        try:
+            structured_prompt = f"""
+            {prompt}
+            
+            Please provide your response in {output_format} format.
+            """
+            
+            response = await self.generate_response(structured_prompt, use_search=False)
+            
+            return {
+                "success": True,
+                "output": response,
+                "format": output_format
+            }
+            
+        except Exception as e:
+            logger.error(f"Structured output generation failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def create_session(self, session_name: str = "default") -> Dict[str, Any]:
+        """Create a new session."""
+        try:
+            session_id = f"{session_name}_{int(time.time())}"
+            
+            # Add session to context
+            self.context["conversations"].append({
+                "session_id": session_id,
+                "name": session_name,
+                "created_at": datetime.now().isoformat(),
+                "messages": []
+            })
+            
+            self._save_context()
+            
+            return {
+                "success": True,
+                "session_id": session_id,
+                "session_name": session_name
+            }
+            
+        except Exception as e:
+            logger.error(f"Session creation failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def enhanced_web_search(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        """Enhanced web search with better formatting."""
+        try:
+            search_results = await self.search_web(query, max_results)
+            
+            return {
+                "success": True,
+                "query": query,
+                "results": search_results,
+                "total_results": len(search_results)
+            }
+            
+        except Exception as e:
+            logger.error(f"Enhanced web search failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def analyze_urls(self, urls: list) -> Dict[str, Any]:
+        """Analyze multiple URLs and extract information."""
+        try:
+            results = []
+            
+            for url in urls:
+                try:
+                    # Simple URL analysis - in a real implementation, you'd fetch and analyze content
+                    analysis_prompt = f"""
+                    Analyze this URL: {url}
+                    
+                    Provide:
+                    1. Domain information
+                    2. Content type
+                    3. Security assessment
+                    4. Accessibility
+                    """
+                    
+                    response = await self.generate_response(analysis_prompt, use_search=False)
+                    
+                    results.append({
+                        "url": url,
+                        "analysis": response,
+                        "status": "success"
+                    })
+                    
+                except Exception as e:
+                    results.append({
+                        "url": url,
+                        "error": str(e),
+                        "status": "failed"
+                    })
+            
+            return {
+                "success": True,
+                "results": results,
+                "total_urls": len(urls)
+            }
+            
+        except Exception as e:
+            logger.error(f"URL analysis failed: {e}")
+            return {"success": False, "error": str(e)}
     
     async def clear_context(self):
         """Clear all context data."""

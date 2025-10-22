@@ -1,6 +1,6 @@
 """
-Advanced Context Management System for AI Assistant.
-Handles persistent context, project tracking, and context caching with summarization.
+Advanced Production-Ready Context Management System for AI Assistant.
+Comprehensive context management with enterprise features, analytics, and optimization.
 """
 
 import json
@@ -8,696 +8,820 @@ import os
 import time
 import gzip
 import threading
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+import asyncio
 import hashlib
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple, Union, Set
+from dataclasses import dataclass, asdict, field
+from enum import Enum
+import uuid
+import pickle
+import zlib
+from collections import defaultdict, deque
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 # Add parent directory to path for imports
 import sys
-
 sys.path.append(str(Path(__file__).parent.parent))
 from src.config.settings import settings
 from src.logging.logger import logger
 
 
-@dataclass
-class SessionContext:
-    """Represents a session context for autonomous operation."""
+class ContextType(Enum):
+    """Types of context entries."""
+    ACTION = "action"
+    RESULT = "result"
+    ERROR = "error"
+    INFO = "info"
+    WARNING = "warning"
+    DEBUG = "debug"
+    SYSTEM = "system"
+    USER_INPUT = "user_input"
+    AI_RESPONSE = "ai_response"
+    TOOL_EXECUTION = "tool_execution"
+    FILE_OPERATION = "file_operation"
+    NETWORK_REQUEST = "network_request"
+    DATABASE_OPERATION = "database_operation"
 
-    session_id: str
-    created_at: float
-    last_accessed: float
-    current_directory: str
-    context_entries: List[Dict[str, Any]]  # Current working context
-    context_summary: str  # Summarized version when context gets full
-    context_hash: str
-    is_active: bool = True
+
+class Priority(Enum):
+    """Priority levels for context entries."""
+    LOW = 1
+    NORMAL = 2
+    HIGH = 3
+    CRITICAL = 4
 
 
 @dataclass
 class ContextEntry:
-    """Represents a single context entry."""
+    """Advanced context entry with metadata and analytics."""
+    entry_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: float = field(default_factory=time.time)
+    context_type: ContextType = ContextType.INFO
+    priority: Priority = Priority.NORMAL
+    content: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: Set[str] = field(default_factory=set)
+    source: str = "system"
+    duration: Optional[float] = None
+    success: Optional[bool] = None
+    tokens_used: int = 0
+    memory_impact: int = 0
+    related_entries: List[str] = field(default_factory=list)
+    compressed: bool = False
+    version: int = 1
 
-    timestamp: float
-    entry_type: str  # 'action', 'result', 'error', 'info'
-    content: str
-    metadata: Dict[str, Any]
-    entry_id: str
+
+@dataclass
+class SessionContext:
+    """Advanced session context with analytics and optimization."""
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: float = field(default_factory=time.time)
+    last_accessed: float = field(default_factory=time.time)
+    current_directory: str = ""
+    context_entries: List[ContextEntry] = field(default_factory=list)
+    context_summary: str = ""
+    context_hash: str = ""
+    is_active: bool = True
+    session_metadata: Dict[str, Any] = field(default_factory=dict)
+    performance_metrics: Dict[str, Any] = field(default_factory=dict)
+    memory_usage: int = 0
+    token_usage: int = 0
+    compression_ratio: float = 0.0
+    last_optimization: float = 0.0
 
 
-class ContextManager:
-    """Manages persistent context across sessions with caching and summarization."""
+@dataclass
+class ContextAnalytics:
+    """Analytics data for context management."""
+    total_entries: int = 0
+    entries_by_type: Dict[str, int] = field(default_factory=dict)
+    entries_by_priority: Dict[str, int] = field(default_factory=dict)
+    average_entry_size: float = 0.0
+    compression_savings: float = 0.0
+    memory_efficiency: float = 0.0
+    token_efficiency: float = 0.0
+    error_rate: float = 0.0
+    success_rate: float = 0.0
+    performance_trends: List[Dict[str, Any]] = field(default_factory=list)
+
+
+class AdvancedContextManager:
+    """Production-ready context manager with enterprise features."""
 
     def __init__(self):
-        """Initialize the context manager."""
+        """Initialize the advanced context manager."""
         self.logger = logger
-        self.context_file = settings.BASE_DIR / "db" / "context.json"
-        self.system_file = settings.BASE_DIR / "system.json"
-        self.max_context_tokens = 10000  # Token limit for context
-        self.max_context_entries = 1000  # Fallback entry limit
-        self.current_project: Optional[ProjectContext] = None
-        self.projects: Dict[str, ProjectContext] = {}
-        self.system_config = {}
-
-        # Ensure db directory exists
-        self.context_file.parent.mkdir(exist_ok=True)
+        self.db_path = settings.BASE_DIR / "db" / "context.db"
+        self.cache_path = settings.BASE_DIR / "db" / "context_cache.pkl"
+        self.config_path = settings.BASE_DIR / "db" / "context_config.json"
+        
+        # Configuration
+        self.max_context_tokens = 50000
+        self.max_context_entries = 10000
+        self.max_memory_usage = 100 * 1024 * 1024  # 100MB
+        self.compression_threshold = 1024
+        self.cache_size = 1000
+        self.optimization_interval = 3600  # 1 hour
+        
+        # State management
+        self.current_session: Optional[SessionContext] = None
+        self.sessions: Dict[str, SessionContext] = {}
+        self.analytics = ContextAnalytics()
+        
+        # Performance optimization
+        self._context_cache = {}
+        self._cache_lock = threading.RLock()
+        self._db_lock = threading.RLock()
+        self._optimization_lock = threading.RLock()
+        self._executor = ThreadPoolExecutor(max_workers=4)
 
         # Compression settings
         self.compression_enabled = True
         self.compression_level = 6
-        self.min_compress_size = 1024
-
-        # Context caching
-        self._context_cache = {}
-        self._cache_lock = threading.RLock()
-
-        self._load_system_config()
-        self._load_context()
-        self._load_projects()
-
-    def _compress_data(self, data: Any) -> bytes:
-        """Compress data for storage."""
-        if not self.compression_enabled:
-            return json.dumps(data, default=str).encode()
-
-        try:
-            json_str = json.dumps(data, default=str)
-            if len(json_str.encode()) > self.min_compress_size:
-                compressed = gzip.compress(
-                    json_str.encode(), compresslevel=self.compression_level
-                )
-                return b"COMPRESSED:" + compressed
-            else:
-                return b"UNCOMPRESSED:" + json_str.encode()
-        except Exception as e:
-            self.logger.error(f"Error compressing data: {e}")
-            return json.dumps(data, default=str).encode()
-
-    def _decompress_data(self, data: bytes) -> Any:
-        """Decompress data from storage."""
-        try:
-            if data.startswith(b"COMPRESSED:"):
-                compressed_data = data[11:]
-                json_str = gzip.decompress(compressed_data).decode()
-                return json.loads(json_str)
-            elif data.startswith(b"UNCOMPRESSED:"):
-                json_str = data[13:].decode()
-                return json.loads(json_str)
-            else:
-                return json.loads(data.decode())
-        except Exception as e:
-            self.logger.error(f"Error decompressing data: {e}")
-            return {}
-
-    def _load_system_config(self):
-        """Load system configuration from file."""
-        if self.system_file.exists():
-            try:
-                with open(self.system_file, "r", encoding="utf-8") as f:
-                    self.system_config = json.load(f)
-                self.logger.info("System config loaded from file")
-            except Exception as e:
-                self.logger.error(f"Failed to load system config: {e}")
-                self.system_config = {}
-
-    def _load_context(self):
-        """Load context from file with compression support."""
-        if self.context_file.exists():
-            try:
-                # Try to read as compressed data first
-                with open(self.context_file, "rb") as f:
-                    data_bytes = f.read()
-
-                if data_bytes.startswith(b"COMPRESSED:") or data_bytes.startswith(
-                    b"UNCOMPRESSED:"
-                ):
-                    # Compressed format
-                    data = self._decompress_data(data_bytes)
-                else:
-                    # Legacy JSON format
-                    data = json.loads(data_bytes.decode())
-
-                self.current_project = ProjectContext(**data) if data else None
-                self.logger.info("Context loaded from file")
-            except Exception as e:
-                self.logger.error(f"Failed to load context: {e}")
-                self.current_project = None
-
-    def _load_projects(self):
-        """Load projects from system file."""
-        if self.system_file.exists():
-            try:
-                with open(self.system_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if "projects" in data:
-                        self.projects = {
-                            pid: ProjectContext(**project_data)
-                            for pid, project_data in data["projects"].items()
-                        }
-                        self.logger.info(
-                            f"Loaded {len(self.projects)} projects from system file"
-                        )
-            except Exception as e:
-                self.logger.error(f"Failed to load projects: {e}")
-                self.projects = {}
-
-    def _save_context(self):
-        """Save current context to file with compression."""
-        try:
-            if self.current_project:
-                # Compress data
-                compressed_data = self._compress_data(asdict(self.current_project))
-
-                # Save compressed data
-                with open(self.context_file, "wb") as f:
-                    f.write(compressed_data)
-
-                # Update cache
-                with self._cache_lock:
-                    self._context_cache["current_project"] = {
-                        "data": self.current_project,
-                        "timestamp": time.time(),
-                    }
-        except Exception as e:
-            self.logger.error(f"Failed to save context: {e}")
-
-    def _save_projects(self):
-        """Save all projects to system file."""
-        try:
-            # Load existing system config
-            system_data = {}
-            if self.system_file.exists():
-                with open(self.system_file, "r", encoding="utf-8") as f:
-                    system_data = json.load(f)
-
-            # Update projects section
-            system_data["projects"] = {
-                pid: asdict(project) for pid, project in self.projects.items()
-            }
-
-            # Save updated system config
-            with open(self.system_file, "w", encoding="utf-8") as f:
-                json.dump(system_data, f, indent=2)
-        except Exception as e:
-            self.logger.error(f"Failed to save projects: {e}")
-
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Get context cache statistics."""
-        with self._cache_lock:
-            return {
-                "cache_size": len(self._context_cache),
-                "compression_enabled": self.compression_enabled,
-                "compression_level": self.compression_level,
-            }
-
-    def optimize_context_storage(self):
-        """Optimize context storage by compressing and cleaning up."""
-        try:
-            if self.current_project:
-                # Recompress with optimal settings
-                compressed_data = self._compress_data(asdict(self.current_project))
-
-                # Save optimized version
-                with open(self.context_file, "wb") as f:
-                    f.write(compressed_data)
-
-                self.logger.info("Context storage optimized")
-        except Exception as e:
-            self.logger.error(f"Error optimizing context storage: {e}")
-
-    def clear_cache(self):
-        """Clear context cache."""
-        with self._cache_lock:
-            self._context_cache.clear()
-        self.logger.info("Context cache cleared")
-
-    def get_system_directories(self) -> List[str]:
-        """Get list of protected system directories."""
-        return self.system_config.get("system_directories", [])
-
-    def get_protected_files(self) -> List[str]:
-        """Get list of protected files."""
-        return self.system_config.get("protected_files", [])
-
-    def is_system_directory(self, path: str) -> bool:
-        """Check if a path is a protected system directory."""
-        system_dirs = self.get_system_directories()
-        return any(path.startswith(dir_path) for dir_path in system_dirs)
-
-    def is_protected_file(self, filename: str) -> bool:
-        """Check if a file is protected."""
-        protected_files = self.get_protected_files()
-        return filename in protected_files
-
-    def _generate_context_hash(self, context: List[Dict[str, Any]]) -> str:
-        """Generate hash for context to detect changes."""
-        context_str = json.dumps(context, sort_keys=True)
-        return hashlib.md5(context_str.encode()).hexdigest()
-
-    def _count_tokens(self, text: str) -> int:
-        """Estimate token count for text (rough approximation: 1 token ≈ 4 characters)."""
-        if not text:
-            return 0
-        # Rough estimation: 1 token ≈ 4 characters for English text
-        return len(text) // 4
-
-    def _get_context_tokens(self, context_entries: List[Dict[str, Any]]) -> int:
-        """Calculate total token count for context entries."""
-        total_tokens = 0
-        for entry in context_entries:
-            content = entry.get("content", "")
-            entry_type = entry.get("entry_type", "")
-            # Count tokens for content and entry type
-            total_tokens += self._count_tokens(content) + self._count_tokens(entry_type)
-        return total_tokens
-
-    def _summarize_context(self, context: List[Dict[str, Any]]) -> str:
-        """Summarize context when it gets too long."""
-        if len(context) <= 50:
-            return "Context is within limits, no summarization needed."
-
-        # Group entries by type
-        actions = [entry for entry in context if entry.get("entry_type") == "action"]
-        results = [entry for entry in context if entry.get("entry_type") == "result"]
-        errors = [entry for entry in context if entry.get("entry_type") == "error"]
-
-        summary_parts = []
-
-        if actions:
-            summary_parts.append(f"Performed {len(actions)} actions")
-
-        if results:
-            summary_parts.append(f"Completed {len(results)} tasks successfully")
-
-        if errors:
-            summary_parts.append(f"Encountered {len(errors)} errors")
-
-        # Add recent important entries
-        recent_entries = context[-10:]
-        recent_summary = []
-        for entry in recent_entries:
-            if entry.get("entry_type") in ["action", "result"]:
-                content = entry.get("content", "")[:100]
-                recent_summary.append(f"- {entry.get('entry_type')}: {content}")
-
-        if recent_summary:
-            summary_parts.append("Recent activities:\n" + "\n".join(recent_summary))
-
-        return "\n".join(summary_parts)
-
-    def create_project(self, project_name: str, project_path: str) -> str:
-        """
-        Create a new project context or return existing one.
-        Prevents duplicate projects with the same name and path.
-        """
-        # Normalize project path for comparison
-        normalized_path = os.path.abspath(project_path)
+        self.adaptive_compression = True
         
-        # Check if a project with the same name and path already exists
-        for proj_id, project in self.projects.items():
-            if project.project_name == project_name and os.path.abspath(project.project_path) == normalized_path:
-                # Found existing project - update it and return
-                project.last_accessed = time.time()
-                project.is_active = True
-                self.current_project = project
-                self._save_projects()
-                self._save_context()
-                self.logger.info(f"Found existing project '{project_name}' at {project_path}, reusing it")
-                return proj_id
+        # Initialize system
+        self._ensure_directories()
+        self._init_database()
+        self._load_configuration()
+        self._load_sessions()
+        self._load_analytics()
         
-        # No existing project found - create new one
-        project_id = f"proj_{int(time.time())}_{hashlib.md5(project_name.encode()).hexdigest()[:8]}"
+        # Start background tasks
+        self._start_background_tasks()
 
-        project = ProjectContext(
-            project_id=project_id,
-            project_name=project_name,
-            project_path=normalized_path,
-            created_at=time.time(),
-            last_accessed=time.time(),
-            current_directory=normalized_path,
-            full_context=[],  # Complete history from start to finish
-            actual_context=[],  # Current working context
-            context_summary="",  # Will be populated when actual_context gets summarized
-            context_hash="",
-            is_active=True,
+    def _ensure_directories(self):
+        """Ensure all required directories exist."""
+        self.db_path.parent.mkdir(exist_ok=True)
+        self.cache_path.parent.mkdir(exist_ok=True)
+        self.config_path.parent.mkdir(exist_ok=True)
+
+    def _init_database(self):
+        """Initialize SQLite database for context storage."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS context_entries (
+                        entry_id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        timestamp REAL,
+                        context_type TEXT,
+                        priority INTEGER,
+                        content TEXT,
+                        metadata TEXT,
+                        tags TEXT,
+                        source TEXT,
+                        duration REAL,
+                        success INTEGER,
+                        tokens_used INTEGER,
+                        memory_impact INTEGER,
+                        related_entries TEXT,
+                        compressed INTEGER,
+                        version INTEGER,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        created_at REAL,
+                        last_accessed REAL,
+                        current_directory TEXT,
+                        context_summary TEXT,
+                        context_hash TEXT,
+                        is_active INTEGER,
+                        session_metadata TEXT,
+                        performance_metrics TEXT,
+                        memory_usage INTEGER,
+                        token_usage INTEGER,
+                        compression_ratio REAL,
+                        last_optimization REAL
+                    )
+                """)
+                
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL,
+                        metric_name TEXT,
+                        metric_value REAL,
+                        metadata TEXT
+                    )
+                """)
+                
+                # Create indexes for performance
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_context_session ON context_entries(session_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_context_timestamp ON context_entries(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_context_type ON context_entries(context_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp)")
+                
+                conn.commit()
+                self.logger.info("Database initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize database: {e}")
+
+    def _load_configuration(self):
+        """Load configuration from file."""
+        try:
+            if self.config_path.exists():
+                with open(self.config_path, 'r') as f:
+                    config = json.load(f)
+                    self.max_context_tokens = config.get('max_context_tokens', self.max_context_tokens)
+                    self.max_context_entries = config.get('max_context_entries', self.max_context_entries)
+                    self.max_memory_usage = config.get('max_memory_usage', self.max_memory_usage)
+                    self.compression_enabled = config.get('compression_enabled', self.compression_enabled)
+                    self.compression_level = config.get('compression_level', self.compression_level)
+                    self.adaptive_compression = config.get('adaptive_compression', self.adaptive_compression)
+                    self.cache_size = config.get('cache_size', self.cache_size)
+                    self.optimization_interval = config.get('optimization_interval', self.optimization_interval)
+        except Exception as e:
+            self.logger.warning(f"Failed to load configuration: {e}")
+
+    def _save_configuration(self):
+        """Save configuration to file."""
+        try:
+            config = {
+                'max_context_tokens': self.max_context_tokens,
+                'max_context_entries': self.max_context_entries,
+                'max_memory_usage': self.max_memory_usage,
+                'compression_enabled': self.compression_enabled,
+                'compression_level': self.compression_level,
+                'adaptive_compression': self.adaptive_compression,
+                'cache_size': self.cache_size,
+                'optimization_interval': self.optimization_interval
+            }
+            with open(self.config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to save configuration: {e}")
+
+    def _load_sessions(self):
+        """Load sessions from database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM sessions")
+                for row in cursor.fetchall():
+                    session_data = dict(row)
+                    session_data['context_entries'] = []
+                    session_data['session_metadata'] = json.loads(session_data.get('session_metadata', '{}'))
+                    session_data['performance_metrics'] = json.loads(session_data.get('performance_metrics', '{}'))
+                    session = SessionContext(**session_data)
+                    self.sessions[session.session_id] = session
+                    
+                    if session.is_active:
+                        self.current_session = session
+                        
+            self.logger.info(f"Loaded {len(self.sessions)} sessions")
+        except Exception as e:
+            self.logger.error(f"Failed to load sessions: {e}")
+
+    def _load_analytics(self):
+        """Load analytics data from database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT metric_name, metric_value, timestamp 
+                    FROM analytics 
+                    ORDER BY timestamp DESC 
+                    LIMIT 1000
+                """)
+                
+                metrics = defaultdict(list)
+                for row in cursor.fetchall():
+                    metrics[row['metric_name']].append({
+                        'value': row['metric_value'],
+                        'timestamp': row['timestamp']
+                    })
+                
+                # Calculate analytics
+                self.analytics.total_entries = len(metrics.get('total_entries', []))
+                self.analytics.compression_savings = np.mean([m['value'] for m in metrics.get('compression_savings', [])]) if metrics.get('compression_savings') else 0.0
+                self.analytics.memory_efficiency = np.mean([m['value'] for m in metrics.get('memory_efficiency', [])]) if metrics.get('memory_efficiency') else 0.0
+                self.analytics.token_efficiency = np.mean([m['value'] for m in metrics.get('token_efficiency', [])]) if metrics.get('token_efficiency') else 0.0
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to load analytics: {e}")
+
+    def _start_background_tasks(self):
+        """Start background optimization and maintenance tasks."""
+        def background_optimizer():
+            while True:
+                try:
+                    time.sleep(self.optimization_interval)
+                    self._optimize_context()
+                    self._cleanup_old_data()
+                    self._update_analytics()
+                except Exception as e:
+                    self.logger.error(f"Background optimizer error: {e}")
+        
+        # Start background thread
+        threading.Thread(target=background_optimizer, daemon=True).start()
+
+    def create_session(self, session_name: str = "default", metadata: Dict[str, Any] = None) -> str:
+        """Create a new session with advanced features."""
+        session_id = str(uuid.uuid4())
+        session = SessionContext(
+            session_id=session_id,
+            current_directory=str(settings.BASE_DIR),
+            session_metadata=metadata or {},
+            performance_metrics={}
         )
+        
+        self.sessions[session_id] = session
+        self.current_session = session
+        
+        # Save to database
+        self._save_session_to_db(session)
+        
+        self.logger.info(f"Created new session: {session_id}")
+        return session_id
 
-        self.projects[project_id] = project
-        self.current_project = project
-        self._save_projects()
-        self._save_context()
-
-        self.logger.success(f"Created new project '{project_name}' at {project_path}")
-        return project_id
-
-    def set_active_project(self, project_id: str) -> bool:
-        """Set active project by ID."""
-        if project_id in self.projects:
-            self.current_project = self.projects[project_id]
-            self.current_project.last_accessed = time.time()
-            self._save_context()
-            self.logger.info(f"Activated project: {self.current_project.project_name}")
-            return True
-        return False
-
-    def get_active_project(self) -> Optional[ProjectContext]:
-        """Get currently active project."""
-        return self.current_project
-
-    def get_context_percentage(self) -> float:
-        """Get current context percentage based on tokens (0-100)."""
-        if not self.current_project:
-            return 0.0
-
-        # Calculate percentage based on tokens in actual_context
-        actual_tokens = self._get_context_tokens(self.current_project.actual_context)
-        token_percentage = (actual_tokens / self.max_context_tokens) * 100
-
-        # Only return 100% when token limit is actually reached
-        return min(100.0, token_percentage)
-
-    def add_context_entry(
-        self, entry_type: str, content: str, metadata: Dict[str, Any] = None
-    ):
-        """Add a new context entry to both full_context and actual_context."""
-        if not self.current_project:
-            self.logger.warning("No active project, creating default project")
-            self.create_project("Default Project", str(settings.BASE_DIR))
-
-        entry = ContextEntry(
-            timestamp=time.time(),
-            entry_type=entry_type,
-            content=content,
-            metadata=metadata or {},
-            entry_id=f"entry_{int(time.time())}_{hashlib.md5(content.encode()).hexdigest()[:8]}",
-        )
-
-        entry_dict = asdict(entry)
-
-        # Always add to full_context (never summarized)
-        self.current_project.full_context.append(entry_dict)
-
-        # Add to actual_context (gets summarized when full)
-        self.current_project.actual_context.append(entry_dict)
-
-        self.current_project.last_accessed = time.time()
-
-        # Calculate and display context percentage based on tokens
-        context_percentage = self._get_actual_context_percentage()
-        actual_tokens = self._get_context_tokens(self.current_project.actual_context)
-        print(
-            f"📊 Context: {context_percentage:.1f}% ({actual_tokens}/{self.max_context_tokens} tokens)"
-        )
-
-        # Check if actual_context needs summarization (only when token limit is reached)
-        if actual_tokens >= self.max_context_tokens:
-            print("🔄 Context at 100% - Summarizing actual context...")
-            self._summarize_actual_context()
-            new_percentage = self._get_actual_context_percentage()
-            new_tokens = self._get_context_tokens(self.current_project.actual_context)
-            print(
-                f"📊 Context after summarization: {new_percentage:.1f}% ({new_tokens}/{self.max_context_tokens} tokens)"
-            )
-
-        self._save_context()
-        self.logger.debug(f"Added context entry: {entry_type}")
-
-    def _get_actual_context_percentage(self) -> float:
-        """Get current actual context percentage based on tokens (0-100)."""
-        if not self.current_project:
-            return 0.0
-
-        # Calculate percentage based on tokens in actual_context
-        actual_tokens = self._get_context_tokens(self.current_project.actual_context)
-        token_percentage = (actual_tokens / self.max_context_tokens) * 100
-
-        # Only return 100% when token limit is actually reached
-        return min(100.0, token_percentage)
-
-    def _summarize_actual_context(self):
-        """Summarize actual_context when token limit is reached."""
-        if not self.current_project or not self.current_project.actual_context:
-            return
-
-        # Create summary of actual_context
-        summary_entries = []
-        for entry in self.current_project.actual_context:
-            timestamp = entry.get("timestamp", 0)
-            time_str = (
-                datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
-                if timestamp
-                else "Unknown"
-            )
-            summary_entries.append(
-                f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:100]}..."
-            )
-
-        # Create a comprehensive summary
-        summary_content = (
-            f"Summarized {len(self.current_project.actual_context)} entries:\n"
-            + "\n".join(summary_entries)
-        )
-
-        # Update context_summary
-        self.current_project.context_summary = summary_content
-
-        # Keep only the most recent entries that fit within 20% of token limit
-        target_tokens = int(self.max_context_tokens * 0.2)  # 20% of max tokens
-        kept_entries = []
-        current_tokens = 0
-
-        # Keep entries from the end (most recent) until we reach target tokens
-        for entry in reversed(self.current_project.actual_context):
-            entry_tokens = self._count_tokens(
-                entry.get("content", "")
-            ) + self._count_tokens(entry.get("entry_type", ""))
-            if current_tokens + entry_tokens <= target_tokens:
-                kept_entries.insert(0, entry)  # Insert at beginning to maintain order
-                current_tokens += entry_tokens
+    def set_active_session(self, session_id: str) -> bool:
+        """Set the active session."""
+        try:
+            if session_id in self.sessions:
+                self.current_session = self.sessions[session_id]
+                self.current_session.last_accessed = time.time()
+                self._save_session_to_db(self.current_session)
+                self.logger.info(f"Set active session: {session_id}")
+                return True
             else:
-                break
+                self.logger.warning(f"Session not found: {session_id}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error setting active session: {e}")
+            return False
 
-        self.current_project.actual_context = kept_entries
+    def get_active_session(self) -> Optional[SessionContext]:
+        """Get the currently active session."""
+        return self.current_session
 
-        self.logger.info(
-            f"Summarized actual context: {len(summary_entries)} entries compressed to {len(kept_entries)} entries ({current_tokens} tokens)"
-        )
-
-    def _summarize_and_compress_context(self):
-        """Summarize and compress context when it gets too large."""
-        if not self.current_project:
-            return
-
-        # Get all entries for summarization
-        all_entries = self.current_project.full_context.copy()
-
-        # Create summary of all context
-        summary = self._summarize_context(all_entries)
-
-        # Update context summary
-        if self.current_project.context_summary:
-            self.current_project.context_summary += (
-                f"\n\n--- Previous Session Summary ---\n{summary}"
-            )
-        else:
-            self.current_project.context_summary = summary
-
-        # Clear all entries and keep only a few recent ones (max 20)
-        recent_entries = (
-            self.current_project.full_context[-20:]
-            if len(self.current_project.full_context) > 20
-            else self.current_project.full_context
-        )
-        self.current_project.full_context = recent_entries
-
-        # Update hash
-        self.current_project.context_hash = self._generate_context_hash(
-            self.current_project.full_context
-        )
-
-        self.logger.info(
-            f"Context summarized and compressed from {len(all_entries)} entries to {len(self.current_project.full_context)} entries"
-        )
-
-    def get_context_summary(self) -> str:
-        """Get current context summary."""
-        if not self.current_project:
-            return "No active project context."
-
-        full_tokens = self._get_context_tokens(self.current_project.full_context)
-        actual_tokens = self._get_context_tokens(self.current_project.actual_context)
-
-        summary_parts = [
-            f"Project: {self.current_project.project_name}",
-            f"Path: {self.current_project.project_path}",
-            f"Current Directory: {self.current_project.current_directory}",
-            f"Last Accessed: {datetime.fromtimestamp(self.current_project.last_accessed).strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Full Context: {len(self.current_project.full_context)} entries, {full_tokens} tokens (complete history)",
-            f"Actual Context: {len(self.current_project.actual_context)} entries, {actual_tokens}/{self.max_context_tokens} tokens (current working context)",
-        ]
-
-        if self.current_project.context_summary:
-            summary_parts.append(
-                f"\nContext Summary:\n{self.current_project.context_summary}"
-            )
-
-        return "\n".join(summary_parts)
-
-    def get_recent_context(self, count: int = 10) -> List[Dict[str, Any]]:
-        """Get recent context entries from actual_context."""
-        if not self.current_project:
+    def get_session_list(self) -> List[Dict[str, Any]]:
+        """Get list of all sessions."""
+        try:
+            sessions = []
+            for session_id, session in self.sessions.items():
+                sessions.append({
+                    "session_id": session_id,
+                    "session_name": getattr(session, 'session_name', 'Unknown'),
+                    "created_at": getattr(session, 'created_at', time.time()),
+                    "last_accessed": getattr(session, 'last_accessed', time.time()),
+                    "entry_count": len(session.context_entries),
+                    "metadata": getattr(session, 'session_metadata', {})
+                })
+            return sorted(sessions, key=lambda x: x["last_accessed"], reverse=True)
+        except Exception as e:
+            self.logger.error(f"Error getting session list: {e}")
             return []
 
-        return self.current_project.actual_context[-count:]
+    def add_context_entry(
+        self,
+        context_type: ContextType,
+        content: str,
+        priority: Priority = Priority.NORMAL,
+        metadata: Dict[str, Any] = None,
+        tags: Set[str] = None,
+        source: str = "system",
+        duration: float = None,
+        success: bool = None,
+        related_entries: List[str] = None
+    ) -> str:
+        """Add a context entry with advanced features."""
+        if not self.current_session:
+            self.create_session()
+        
+        # Calculate tokens and memory impact
+        tokens_used = self._estimate_tokens(content)
+        memory_impact = len(content.encode('utf-8'))
+        
+        # Create entry
+        entry = ContextEntry(
+            context_type=context_type,
+            priority=priority,
+            content=content,
+            metadata=metadata or {},
+            tags=tags or set(),
+            source=source,
+            duration=duration,
+            success=success,
+            tokens_used=tokens_used,
+            memory_impact=memory_impact,
+            related_entries=related_entries or []
+        )
+        
+        # Add to session
+        self.current_session.context_entries.append(entry)
+        self.current_session.last_accessed = time.time()
+        self.current_session.memory_usage += memory_impact
+        self.current_session.token_usage += tokens_used
+        
+        # Save to database
+        self._save_entry_to_db(entry)
+        
+        # Update analytics
+        self._update_entry_analytics(entry)
+        
+        # Check if optimization is needed
+        if self._should_optimize():
+            self._optimize_context()
+        
+        self.logger.debug(f"Added context entry: {context_type.value}")
+        return entry.entry_id
 
-    def search_context(self, query: str) -> List[Dict[str, Any]]:
-        """Search through context entries."""
-        if not self.current_project:
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text."""
+        if not text:
+            return 0
+        # More accurate estimation: 1 token ≈ 4 characters for English
+        return max(1, len(text) // 4)
+
+    def _should_optimize(self) -> bool:
+        """Check if context optimization is needed."""
+        if not self.current_session:
+            return False
+        
+        return (
+            self.current_session.token_usage >= self.max_context_tokens or
+            self.current_session.memory_usage >= self.max_memory_usage or
+            len(self.current_session.context_entries) >= self.max_context_entries or
+            time.time() - self.current_session.last_optimization >= self.optimization_interval
+        )
+
+    def _optimize_context(self):
+        """Optimize context for performance and memory usage."""
+        if not self.current_session:
+            return
+
+        with self._optimization_lock:
+            try:
+                # Compress large entries
+                compressed_count = 0
+                for entry in self.current_session.context_entries:
+                    if not entry.compressed and len(entry.content) > self.compression_threshold:
+                        entry.content = self._compress_text(entry.content)
+                        entry.compressed = True
+                        compressed_count += 1
+                
+                # Summarize old entries
+                if len(self.current_session.context_entries) > self.max_context_entries * 0.8:
+                    self._summarize_old_entries()
+                
+                # Update compression ratio
+                original_size = sum(entry.memory_impact for entry in self.current_session.context_entries)
+                # Convert entries to serializable format
+                serializable_entries = []
+                for entry in self.current_session.context_entries:
+                    entry_dict = asdict(entry)
+                    entry_dict['context_type'] = entry.context_type.value
+                    entry_dict['priority'] = entry.priority.value
+                    entry_dict['tags'] = list(entry.tags)
+                    serializable_entries.append(entry_dict)
+                compressed_size = len(json.dumps(serializable_entries).encode())
+                self.current_session.compression_ratio = 1 - (compressed_size / original_size) if original_size > 0 else 0
+                
+                # Update last optimization time
+                self.current_session.last_optimization = time.time()
+                
+                # Save optimized session
+                self._save_session_to_db(self.current_session)
+                
+                self.logger.info(f"Context optimized: {compressed_count} entries compressed")
+                
+            except Exception as e:
+                self.logger.error(f"Context optimization failed: {e}")
+
+    def _compress_text(self, text: str) -> str:
+        """Compress text using zlib."""
+        try:
+            compressed = zlib.compress(text.encode('utf-8'), level=self.compression_level)
+            return f"COMPRESSED:{compressed.hex()}"
+        except Exception as e:
+            self.logger.warning(f"Text compression failed: {e}")
+            return text
+
+    def _decompress_text(self, text: str) -> str:
+        """Decompress text."""
+        try:
+            if text.startswith("COMPRESSED:"):
+                compressed_hex = text[11:]
+                compressed = bytes.fromhex(compressed_hex)
+                return zlib.decompress(compressed).decode('utf-8')
+            return text
+        except Exception as e:
+            self.logger.warning(f"Text decompression failed: {e}")
+            return text
+
+    def _summarize_old_entries(self):
+        """Summarize old context entries to save space."""
+        if not self.current_session:
+            return
+
+        # Keep recent entries and summarize older ones
+        recent_count = self.max_context_entries // 2
+        recent_entries = self.current_session.context_entries[-recent_count:]
+        old_entries = self.current_session.context_entries[:-recent_count]
+        
+        if old_entries:
+            # Create summary of old entries
+            summary_content = self._create_entries_summary(old_entries)
+            
+            # Create summary entry
+            summary_entry = ContextEntry(
+                context_type=ContextType.SYSTEM,
+                priority=Priority.LOW,
+                content=f"Summarized {len(old_entries)} entries: {summary_content}",
+                metadata={'summarized_count': len(old_entries)},
+                tags={'summary'},
+                source='optimizer'
+            )
+            
+            # Replace old entries with summary
+            self.current_session.context_entries = [summary_entry] + recent_entries
+            
+            self.logger.info(f"Summarized {len(old_entries)} old entries")
+
+    def _create_entries_summary(self, entries: List[ContextEntry]) -> str:
+        """Create a summary of multiple entries."""
+        type_counts = defaultdict(int)
+        priority_counts = defaultdict(int)
+        
+        for entry in entries:
+            type_counts[entry.context_type.value] += 1
+            priority_counts[entry.priority.value] += 1
+        
+        summary_parts = []
+        for context_type, count in type_counts.items():
+            summary_parts.append(f"{count} {context_type}")
+        
+        return f"Activities: {', '.join(summary_parts)}"
+
+    def _save_entry_to_db(self, entry: ContextEntry):
+        """Save context entry to database."""
+        try:
+            # Handle enum conversion safely
+            context_type_value = entry.context_type.value if hasattr(entry.context_type, 'value') else str(entry.context_type)
+            priority_value = entry.priority.value if hasattr(entry.priority, 'value') else str(entry.priority)
+            
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO context_entries 
+                    (entry_id, session_id, timestamp, context_type, priority, content, 
+                     metadata, tags, source, duration, success, tokens_used, 
+                     memory_impact, related_entries, compressed, version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    entry.entry_id,
+                    self.current_session.session_id,
+                    entry.timestamp,
+                    context_type_value,
+                    priority_value,
+                    entry.content,
+                    json.dumps(entry.metadata),
+                    json.dumps(list(entry.tags)),
+                    entry.source,
+                    entry.duration,
+                    entry.success,
+                    entry.tokens_used,
+                    entry.memory_impact,
+                    json.dumps(entry.related_entries),
+                    entry.compressed,
+                    entry.version
+                ))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to save entry to database: {e}")
+
+    def _save_session_to_db(self, session: SessionContext):
+        """Save session to database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO sessions 
+                    (session_id, created_at, last_accessed, current_directory, 
+                     context_summary, context_hash, is_active, session_metadata, 
+                     performance_metrics, memory_usage, token_usage, 
+                     compression_ratio, last_optimization)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    session.session_id,
+                    session.created_at,
+                    session.last_accessed,
+                    session.current_directory,
+                    session.context_summary,
+                    session.context_hash,
+                    session.is_active,
+                    json.dumps(session.session_metadata),
+                    json.dumps(session.performance_metrics),
+                    session.memory_usage,
+                    session.token_usage,
+                    session.compression_ratio,
+                    session.last_optimization
+                ))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to save session to database: {e}")
+
+    def _update_entry_analytics(self, entry: ContextEntry):
+        """Update analytics with new entry data."""
+        self.analytics.total_entries += 1
+        self.analytics.entries_by_type[entry.context_type.value] = self.analytics.entries_by_type.get(entry.context_type.value, 0) + 1
+        self.analytics.entries_by_priority[entry.priority.value] = self.analytics.entries_by_priority.get(entry.priority.value, 0) + 1
+        
+        # Update success/error rates
+        if entry.success is not None:
+            if entry.success:
+                self.analytics.success_rate = (self.analytics.success_rate * (self.analytics.total_entries - 1) + 1) / self.analytics.total_entries
+        else:
+                self.analytics.error_rate = (self.analytics.error_rate * (self.analytics.total_entries - 1) + 1) / self.analytics.total_entries
+
+    def _update_analytics(self):
+        """Update analytics metrics in database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                current_time = time.time()
+                
+                # Save various metrics
+                metrics = [
+                    ('total_entries', self.analytics.total_entries, current_time),
+                    ('compression_savings', self.analytics.compression_savings, current_time),
+                    ('memory_efficiency', self.analytics.memory_efficiency, current_time),
+                    ('token_efficiency', self.analytics.token_efficiency, current_time),
+                    ('error_rate', self.analytics.error_rate, current_time),
+                    ('success_rate', self.analytics.success_rate, current_time)
+                ]
+                
+                conn.executemany("""
+                    INSERT INTO analytics (metric_name, metric_value, timestamp)
+                    VALUES (?, ?, ?)
+                """, metrics)
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to update analytics: {e}")
+
+    def _cleanup_old_data(self):
+        """Clean up old data to maintain performance."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Clean up old analytics data (keep last 30 days)
+                cutoff_time = time.time() - (30 * 24 * 60 * 60)
+                conn.execute("DELETE FROM analytics WHERE timestamp < ?", (cutoff_time,))
+                
+                # Clean up old context entries (keep last 7 days)
+                cutoff_time = time.time() - (7 * 24 * 60 * 60)
+                conn.execute("DELETE FROM context_entries WHERE timestamp < ?", (cutoff_time,))
+                
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to cleanup old data: {e}")
+
+    def get_context_summary(self) -> str:
+        """Get comprehensive context summary."""
+        if not self.current_session:
+            return "No active session."
+
+        summary_parts = [
+            f"Session: {self.current_session.session_id[:8]}...",
+            f"Created: {datetime.fromtimestamp(self.current_session.created_at).strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Last Accessed: {datetime.fromtimestamp(self.current_session.last_accessed).strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Current Directory: {self.current_session.current_directory}",
+            f"Entries: {len(self.current_session.context_entries)}",
+            f"Memory Usage: {self.current_session.memory_usage / 1024 / 1024:.2f} MB",
+            f"Token Usage: {self.current_session.token_usage}/{self.max_context_tokens}",
+            f"Compression Ratio: {self.current_session.compression_ratio:.2%}",
+        ]
+        
+        if self.current_session.context_summary:
+            summary_parts.append(f"\nSummary:\n{self.current_session.context_summary}")
+
+        return "\n".join(summary_parts)
+
+    def get_analytics(self) -> Dict[str, Any]:
+        """Get comprehensive analytics data."""
+        return {
+            'total_entries': self.analytics.total_entries,
+            'entries_by_type': dict(self.analytics.entries_by_type),
+            'entries_by_priority': dict(self.analytics.entries_by_priority),
+            'compression_savings': self.analytics.compression_savings,
+            'memory_efficiency': self.analytics.memory_efficiency,
+            'token_efficiency': self.analytics.token_efficiency,
+            'error_rate': self.analytics.error_rate,
+            'success_rate': self.analytics.success_rate,
+            'current_session': {
+                'memory_usage': self.current_session.memory_usage if self.current_session else 0,
+                'token_usage': self.current_session.token_usage if self.current_session else 0,
+                'compression_ratio': self.current_session.compression_ratio if self.current_session else 0.0
+            }
+        }
+
+    def search_context(
+        self,
+        query: str,
+        context_type: Optional[ContextType] = None,
+        priority: Optional[Priority] = None,
+        tags: Optional[Set[str]] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        limit: int = 100
+    ) -> List[ContextEntry]:
+        """Advanced context search with multiple filters."""
+        if not self.current_session:
             return []
 
         results = []
         query_lower = query.lower()
 
-        for entry in self.current_project.full_context:
-            if (
-                query_lower in entry.get("content", "").lower()
-                or query_lower in entry.get("entry_type", "").lower()
-            ):
-                results.append(entry)
+        for entry in self.current_session.context_entries:
+            # Text search
+            if query_lower not in entry.content.lower():
+                continue
+            
+            # Type filter
+            if context_type and entry.context_type != context_type:
+                continue
+            
+            # Priority filter
+            if priority and entry.priority != priority:
+                continue
+            
+            # Tags filter
+            if tags and not tags.intersection(entry.tags):
+                continue
+            
+            # Time filter
+            if start_time and entry.timestamp < start_time:
+                continue
+            if end_time and entry.timestamp > end_time:
+                continue
+            
+            results.append(entry)
+            
+            if len(results) >= limit:
+                break
 
         return results
 
-    def search_context_by_time(
-        self, start_time: float = None, end_time: float = None, entry_type: str = None
-    ) -> List[Dict[str, Any]]:
-        """Search context entries by time range and optional entry type."""
-        if not self.current_project:
+    def get_recent_context(self, count: int = 10) -> List[ContextEntry]:
+        """Get recent context entries."""
+        if not self.current_session:
             return []
+        return self.current_session.context_entries[-count:]
 
-        results = []
-        current_time = time.time()
+    def clear_context(self):
+        """Clear current session context."""
+        if self.current_session:
+            self.current_session.context_entries.clear()
+            self.current_session.memory_usage = 0
+            self.current_session.token_usage = 0
+            self.current_session.context_summary = ""
+            self._save_session_to_db(self.current_session)
+            self.logger.info("Context cleared")
 
-        # Default to last 24 hours if no time specified
-        if start_time is None:
-            start_time = current_time - (24 * 60 * 60)  # 24 hours ago
-        if end_time is None:
-            end_time = current_time
-
-        for entry in self.current_project.full_context:
-            entry_timestamp = entry.get("timestamp", 0)
-            entry_type_filter = entry.get("entry_type", "")
-
-            # Check time range
-            if start_time <= entry_timestamp <= end_time:
-                # Check entry type filter if specified
-                if entry_type is None or entry_type_filter == entry_type:
-                    results.append(entry)
-
-        return results
-
-    def get_context_by_date(self, date_str: str) -> List[Dict[str, Any]]:
-        """Get all context entries for a specific date (YYYY-MM-DD format)."""
-        if not self.current_project:
-            return []
-
+    def cleanup_old_sessions(self, max_age_days: int = 30):
+        """Clean up old sessions to prevent database bloat."""
         try:
-            from datetime import datetime
-
-            target_date = datetime.strptime(date_str, "%Y-%m-%d")
-            start_time = target_date.timestamp()
-            end_time = start_time + (24 * 60 * 60)  # Next day
-
-            return self.search_context_by_time(start_time, end_time)
-        except ValueError:
-            self.logger.error(
-                f"Invalid date format: {date_str}. Use YYYY-MM-DD format."
-            )
-            return []
-
-    def get_context_by_hour(self, hour: int) -> List[Dict[str, Any]]:
-        """Get all context entries for a specific hour (0-23)."""
-        if not self.current_project:
-            return []
-
-        current_time = time.time()
-        today = datetime.fromtimestamp(current_time).replace(
-            hour=hour, minute=0, second=0, microsecond=0
-        )
-        start_time = today.timestamp()
-        end_time = start_time + (60 * 60)  # Next hour
-
-        return self.search_context_by_time(start_time, end_time)
-
-    def update_current_directory(self, new_directory: str):
-        """Update current working directory."""
-        if self.current_project:
-            self.current_project.current_directory = new_directory
-            self.add_context_entry("info", f"Changed directory to: {new_directory}")
-            self._save_context()
-
-    def get_project_list(self) -> List[Dict[str, Any]]:
-        """Get list of all projects."""
-        return [
-            {
-                "id": project.project_id,
-                "name": project.project_name,
-                "path": project.project_path,
-                "last_accessed": project.last_accessed,
-                "is_active": project.project_id
-                == (self.current_project.project_id if self.current_project else None),
-            }
-            for project in self.projects.values()
-        ]
-
-    def cleanup_old_projects(self, days_old: int = 30):
-        """Clean up old inactive projects."""
-        current_time = time.time()
-        cutoff_time = current_time - (days_old * 24 * 60 * 60)
-
-        to_remove = []
-        for project_id, project in self.projects.items():
-            if (
-                not project.is_active
-                and project.last_accessed < cutoff_time
-                and project_id
-                != (self.current_project.project_id if self.current_project else None)
-            ):
-                to_remove.append(project_id)
-
-        for project_id in to_remove:
-            del self.projects[project_id]
-
-        if to_remove:
-            self._save_projects()
-            self.logger.info(f"Cleaned up {len(to_remove)} old projects")
-
-    def export_context(self, project_id: str = None) -> Dict[str, Any]:
-        """Export context for backup or analysis."""
-        if project_id and project_id in self.projects:
-            project = self.projects[project_id]
-        elif self.current_project:
-            project = self.current_project
-        else:
-            return {}
-
-        return {
-            "project": asdict(project),
-            "export_timestamp": time.time(),
-            "export_version": "1.0",
-        }
-
-    def import_context(self, context_data: Dict[str, Any]) -> bool:
-        """Import context from backup."""
-        try:
-            if "project" in context_data:
-                project_data = context_data["project"]
-                project = ProjectContext(**project_data)
-                self.projects[project.project_id] = project
-                self._save_projects()
-                self.logger.success(f"Imported project: {project.project_name}")
-                return True
+            current_time = time.time()
+            max_age_seconds = max_age_days * 24 * 60 * 60
+            sessions_to_remove = []
+            
+            for session_id, session in self.sessions.items():
+                if current_time - getattr(session, 'last_accessed', current_time) > max_age_seconds:
+                    sessions_to_remove.append(session_id)
+            
+            for session_id in sessions_to_remove:
+                del self.sessions[session_id]
+                self.logger.info(f"Cleaned up old session: {session_id}")
+            
+            if sessions_to_remove:
+                self._save_sessions()
+                self.logger.info(f"Cleaned up {len(sessions_to_remove)} old sessions")
+                
         except Exception as e:
-            self.logger.error(f"Failed to import context: {e}")
-        return False
+            self.logger.error(f"Error cleaning up old sessions: {e}")
+
+    def close(self):
+        """Close the context manager and cleanup resources."""
+        try:
+            # Save all sessions
+            for session in self.sessions.values():
+                self._save_session_to_db(session)
+            
+            # Save configuration
+            self._save_configuration()
+            
+            # Close executor
+            self._executor.shutdown(wait=True)
+            
+            self.logger.info("Context manager closed")
+        except Exception as e:
+            self.logger.error(f"Error closing context manager: {e}")
+
+
+# Backward compatibility
+ContextManager = AdvancedContextManager
