@@ -1876,11 +1876,18 @@ Current Request:
             if recent_context:
                 context_string += "**Recent Context (Last 20 entries):**\n"
                 for entry in recent_context:
-                    entry_type = getattr(entry, 'context_type', 'unknown')
-                    if hasattr(entry_type, 'value'):
-                        entry_type = entry_type.value
-                    content = getattr(entry, 'content', "")
-                    timestamp = getattr(entry, 'timestamp', 0)
+                    # Handle both dict and ContextEntry objects
+                    if isinstance(entry, dict):
+                        entry_type = entry.get('type', 'unknown')
+                        content = entry.get('content', "")
+                        timestamp = entry.get('timestamp', 0)
+                    else:
+                        entry_type = getattr(entry, 'context_type', 'unknown')
+                        if hasattr(entry_type, 'value'):
+                            entry_type = entry_type.value
+                        content = getattr(entry, 'content', "")
+                        timestamp = getattr(entry, 'timestamp', 0)
+                    
                     if timestamp:
                         dt = datetime.fromtimestamp(timestamp)
                         time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -1889,7 +1896,7 @@ Current Request:
                         time_str = "Unknown"
                         time_short = "Unknown"
 
-                    if entry_type == "user_request":
+                    if entry_type == "user_input":
                         context_string += f"[{time_str}] User: {content}\n"
                     elif entry_type == "ai_response":
                         context_string += f"[{time_str}] AI: {content}\n"
@@ -3126,11 +3133,13 @@ Always return a valid JSON object.
                 }
 
                 # Add error to context manager
+                from src.core.context_manager import ContextType, Priority
                 error_content = f"Tool '{action}' failed with args: {json.dumps(args, indent=2)}\nError: {error_msg}"
                 self.context_manager.add_context_entry(
-                    "error",
+                    ContextType.ERROR,
                     error_content,
-                    {"action": action, "args": args, "error": error_msg},
+                    Priority.HIGH,
+                    metadata={"action": action, "args": args, "error": error_msg},
                 )
 
                 # Attempt smart error resolution
@@ -3246,48 +3255,208 @@ Always return a valid JSON object.
             self.shutdown()
 
     def _display_clean_response(self):
-        """Display clean response without implementation details."""
+        """Display clean response with natural conversation flow."""
         try:
             # Get the AI response from context
             ai_response = ""
-            steps_performed = []
+            tool_executions = []
             
             # Extract AI response from conversation history
             if self.context.get("conversation_history"):
                 last_conv = self.context["conversation_history"][-1]
                 ai_response = last_conv.get("ai", "")
             
-            # Extract steps from execution history
+            # Extract tool executions from execution history
             if self.context.get("execution_history"):
                 for entry in self.context["execution_history"]:
-                    if entry.get("action") and entry.get("comment"):
-                        steps_performed.append(entry["comment"])
+                    if entry.get("action") and entry.get("result"):
+                        result = entry["result"]
+                        if isinstance(result, dict) and result.get("success"):
+                            output = result.get("output", "")
+                            if output and len(output.strip()) > 0:
+                                # Only show meaningful outputs
+                                if not any(skip in output.lower() for skip in [
+                                    "successfully", "completed successfully", "task completed",
+                                    "command completed", "tool completed", "operation completed"
+                                ]):
+                                    tool_executions.append({
+                                        "action": entry["action"],
+                                        "args": entry.get("args", {}),
+                                        "output": output
+                                    })
             
             # Parse AI response to extract natural message
             natural_message = self._extract_natural_message(ai_response)
             
-            # Display clean response
-            if natural_message:
-                print(f"\nAI: {natural_message}")
-            
-            # Show steps if any were performed (only if they're meaningful)
-            meaningful_steps = [step for step in steps_performed if not step.startswith("The user said")]
-            if meaningful_steps:
-                print("\nSteps performed:")
-                for i, step in enumerate(meaningful_steps, 1):
-                    print(f"  {i}. {step}")
-            
-            # Show final status only if it's meaningful
-            status = self.context.get("status", "")
-            if status and not status.startswith("Initial user request") and "Task completed successfully" not in status:
-                if "failed" in status.lower() or "error" in status.lower():
-                    print(f"\n❌ {status}")
-                elif status != "Task completed successfully.":
-                    print(f"\n📋 {status}")
+            # Display natural conversation flow
+            if tool_executions:
+                # Show tool executions in natural language
+                for i, execution in enumerate(tool_executions):
+                    action = execution["action"]
+                    args = execution["args"]
+                    output = execution["output"]
+                    
+                    # Convert action to natural language
+                    action_desc = self._get_natural_action_description(action, args)
+                    print(f"\n🔧 {action_desc}")
+                    
+                    # Show output in natural format
+                    self._display_natural_output(action, output)
+                    
+                    # Add natural AI commentary between tools if needed
+                    if i < len(tool_executions) - 1:  # Not the last tool
+                        commentary = self._get_tool_commentary(action, output)
+                        if commentary:
+                            print(f"\n💭 {commentary}")
+                
+                # Show final AI response if available
+                if natural_message and not any(word in natural_message.lower() for word in [
+                    "plan", "step", "execute", "tool", "action", "args"
+                ]):
+                    print(f"\n💬 {natural_message}")
+            else:
+                # No tool executions, just show AI response
+                if natural_message:
+                    print(f"\n💬 {natural_message}")
                     
         except Exception as e:
             self.logger.error(f"Error displaying clean response: {e}")
             print(f"\n❌ Error displaying response: {e}")
+
+    def _get_natural_action_description(self, action: str, args: dict) -> str:
+        """Convert tool action to natural language description."""
+        action_descriptions = {
+            "list_dir": f"Looking at the contents of {args.get('directory', 'the directory')}",
+            "google_search": f"Searching the web for '{args.get('query', 'information')}'",
+            "get_system_info": "Checking system information",
+            "read_file": f"Reading the file {args.get('file_path', '')}",
+            "write_file": f"Creating/updating the file {args.get('file_path', '')}",
+            "run_shell": f"Running command: {args.get('command', '')}",
+            "create_directory": f"Creating directory {args.get('directory_path', '')}",
+            "move_mouse": f"Moving mouse to position ({args.get('x', 0)}, {args.get('y', 0)})",
+            "type_text": f"Typing: '{args.get('text', '')}'",
+            "click_screen": f"Clicking at position ({args.get('x', 0)}, {args.get('y', 0)})",
+            "get_mouse_position": "Checking current mouse position",
+            "get_active_window": "Checking the active window",
+            "analyze_screen_actions": "Analyzing what's on the screen",
+            "search_in_file": f"Searching in file {args.get('file_path', '')} for '{args.get('pattern', '')}'",
+            "find_files": f"Looking for files matching '{args.get('pattern', '')}'",
+            "get_file_info": f"Getting information about {args.get('file_path', '')}",
+            "copy_file": f"Copying {args.get('source', '')} to {args.get('destination', '')}",
+            "move_file": f"Moving {args.get('source', '')} to {args.get('destination', '')}",
+            "delete_file": f"Deleting {args.get('file_path', '')}",
+            "change_dir": f"Changing to directory {args.get('directory', '')}",
+            "navigate_to_user_directories": "Navigating to user directories",
+            "complete_task": "Completing the task",
+            "analyze_image": f"Analyzing image {args.get('image_path', '')}",
+            "read_screen": "Taking a screenshot and analyzing it",
+            "scroll_screen": f"Scrolling screen by ({args.get('x', 0)}, {args.get('y', 0)})",
+            "press_key": f"Pressing key: {args.get('key', '')}",
+            "focus_window": f"Focusing window: {args.get('window_title', '')}",
+            "bring_window_to_front": f"Bringing window to front: {args.get('window_title', '')}",
+            "check_browser_status": "Checking browser status",
+            "install_system_package": f"Installing system package: {args.get('package_name', '')}",
+            "check_system_dependency": f"Checking system dependency: {args.get('dependency', '')}",
+            "execute_gui_actions": "Executing GUI actions",
+            "generate_structured_output": "Generating structured output",
+            "create_session": "Creating new session",
+            "replace_in_file": f"Replacing text in file {args.get('file_path', '')}",
+            "search_directory": f"Searching directory {args.get('directory', '')} for '{args.get('pattern', '')}'",
+            "create_archive": f"Creating archive {args.get('archive_path', '')}",
+            "extract_archive": f"Extracting archive {args.get('archive_path', '')}",
+            "read_json_file": f"Reading JSON file {args.get('file_path', '')}",
+            "write_json_file": f"Writing JSON file {args.get('file_path', '')}",
+            "read_csv_file": f"Reading CSV file {args.get('file_path', '')}",
+            "write_csv_file": f"Writing CSV file {args.get('file_path', '')}",
+            "run_linter": f"Running linter on {args.get('file_path', '')}",
+            "replace_in_multiple_files": "Replacing text in multiple files",
+            "enhanced_web_search": f"Enhanced web search for '{args.get('query', '')}'",
+            "analyze_urls": f"Analyzing URLs: {args.get('urls', [])}",
+            "get_directory_size": f"Getting size of directory {args.get('directory', '')}",
+            "find_large_files": f"Finding large files in {args.get('directory', '')}",
+            "get_system_disk_usage": "Checking disk usage",
+            "get_process_info": f"Getting process information for {args.get('process_name', '')}",
+            "open_application": f"Opening application: {args.get('application_name', '')}",
+            "interact_with_process": f"Interacting with process: {args.get('process_name', '')}",
+            "install_package": f"Installing package: {args.get('package_name', '')}",
+            "create_and_save_tool": f"Creating and saving tool: {args.get('tool_name', '')}",
+            "set_active_session": f"Setting active session: {args.get('session_id', '')}",
+            "get_context_summary": "Getting context summary",
+            "search_context_by_time": f"Searching context by time: {args.get('time_range', '')}",
+            "get_context_by_date": f"Getting context by date: {args.get('date', '')}",
+            "get_context_by_hour": f"Getting context by hour: {args.get('hour', '')}",
+        }
+        
+        return action_descriptions.get(action, f"Executing {action}")
+
+    def _display_natural_output(self, action: str, output: str):
+        """Display tool output in a natural, readable format."""
+        if not output or len(output.strip()) == 0:
+            return
+            
+        # Format output based on action type
+        if action == "list_dir":
+            print("📁 Here's what I found:")
+            lines = output.split('\n')
+            for line in lines[:15]:  # Limit to first 15 lines
+                if line.strip():
+                    print(f"   {line}")
+            if len(lines) > 15:
+                print(f"   ... and {len(lines) - 15} more items")
+        
+        elif action == "google_search":
+            print("🌐 Here are the search results:")
+            lines = output.split('\n')
+            for line in lines[:8]:  # Limit to first 8 lines
+                if line.strip():
+                    print(f"   {line}")
+            if len(lines) > 8:
+                print(f"   ... and {len(lines) - 8} more results")
+        
+        elif action == "get_system_info":
+            print("💻 System details:")
+            for line in output.split('\n'):
+                if line.strip():
+                    print(f"   {line}")
+        
+        elif action == "read_file":
+            print("📄 File contents:")
+            lines = output.split('\n')
+            for line in lines[:10]:  # Limit to first 10 lines
+                if line.strip():
+                    print(f"   {line}")
+            if len(lines) > 10:
+                print(f"   ... and {len(lines) - 10} more lines")
+        
+        elif action == "run_shell":
+            print("💻 Command output:")
+            lines = output.split('\n')
+            for line in lines[:10]:  # Limit to first 10 lines
+                if line.strip():
+                    print(f"   {line}")
+            if len(lines) > 10:
+                print(f"   ... and {len(lines) - 10} more lines")
+        
+        else:
+            # Generic output display
+            lines = output.split('\n')
+            for line in lines[:8]:  # Limit to first 8 lines
+                if line.strip():
+                    print(f"   {line}")
+            if len(lines) > 8:
+                print(f"   ... and {len(lines) - 8} more lines")
+
+    def _get_tool_commentary(self, action: str, output: str) -> str:
+        """Generate natural commentary between tool executions."""
+        if action == "list_dir" and "not found" in output.lower():
+            return "The directory wasn't found, let me try a different approach..."
+        elif action == "google_search" and len(output.split('\n')) > 5:
+            return "Found some good results! Let me process this information..."
+        elif action == "read_file" and len(output) > 100:
+            return "That's a substantial file. Let me analyze its contents..."
+        elif action == "run_shell" and "error" in output.lower():
+            return "There was an issue with that command. Let me try something else..."
+        return ""
 
     def _extract_natural_message(self, ai_response: str) -> str:
         """Extract natural message from AI response, handling JSON format."""

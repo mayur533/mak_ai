@@ -91,7 +91,10 @@ class GeminiClient:
         }
         
         # Context management
-        self.context_file = "db/context.json"
+        import os
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent.parent
+        self.context_file = project_root / "db" / "context.json"
         self.max_tokens = 100000
         self.summary_threshold = 0.9
         self.compression_ratio = 0.7
@@ -116,13 +119,19 @@ class GeminiClient:
         """Save context to file."""
         try:
             with open(self.context_file, 'w', encoding='utf-8') as f:
-                json.dump(self.context, f, indent=2, ensure_ascii=False)
+                json.dump(self.context, f, indent=2, ensure_ascii=False, default=str)
         except Exception as e:
             logger.error(f"Failed to save context: {e}")
     
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text."""
-        return len(self.encoder.encode(text))
+        try:
+            if not isinstance(text, str):
+                text = str(text)
+            return len(self.encoder.encode(text))
+        except Exception as e:
+            logger.error(f"Error counting tokens for text type {type(text)}: {e}")
+            return 0
     
     def _should_summarize(self) -> bool:
         """Check if context should be summarized."""
@@ -135,10 +144,19 @@ class GeminiClient:
         
         # Create summary prompt
         conversations = self.context["conversations"][-10:]  # Last 10 conversations
+        
+        # Safely serialize conversations, handling any unhashable types
+        try:
+            conversations_json = json.dumps(conversations, indent=2, default=str)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Failed to serialize conversations: {e}")
+            # Fallback to string representation
+            conversations_json = str(conversations)
+        
         summary_prompt = f"""
         Summarize the following conversation history while preserving important details, decisions, and context:
         
-        {json.dumps(conversations, indent=2)}
+        {conversations_json}
         
         Provide a concise summary that maintains the essential information for future reference.
         """
@@ -153,7 +171,11 @@ class GeminiClient:
             
             self.context["summaries"].append(summary)
             self.context["conversations"] = self.context["conversations"][-5:]  # Keep last 5
-            self.context["current_tokens"] = self._count_tokens(json.dumps(self.context["conversations"]))
+            try:
+                self.context["current_tokens"] = self._count_tokens(json.dumps(self.context["conversations"], default=str))
+            except Exception as e:
+                logger.warning(f"Failed to count tokens for conversations: {e}")
+                self.context["current_tokens"] = 0
             self._save_context()
             
             logger.info(f"Context summarized. Tokens reduced to {self.context['current_tokens']}")
@@ -203,7 +225,7 @@ class GeminiClient:
                 "timestamp": datetime.now().isoformat(),
                 "prompt": prompt,
                 "response": response,
-                "tokens": self._count_tokens(prompt + response)
+                "tokens": self._count_tokens(str(prompt) + str(response))
             }
             
             self.context["conversations"].append(conversation)

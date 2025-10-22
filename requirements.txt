@@ -66,6 +66,12 @@ llama-index-llms-openai>=0.1.0
 llama-index-embeddings-openai>=0.1.0
 chromadb>=0.4.0
 
+# Advanced Context Management (Anthropic Best Practices)
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
 # ReAct Agent and Multi-Agent Systems
 geopy>=2.3.0
 pydantic>=2.0.0
