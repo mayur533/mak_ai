@@ -3,6 +3,7 @@ Core AI System for the AI Assistant System.
 Main orchestrator that handles AI interactions, tool management, and task execution.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -12,8 +13,11 @@ from collections import deque
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
+import aiohttp
+import aiofiles
 
 # Add parent directory to path for imports
 import sys
@@ -30,6 +34,7 @@ from src.tools.google_search import GoogleSearchTool
 from src.core.gemini_client import GeminiClient
 from src.monitoring import metrics_collector, record_request_metric, record_tool_metric
 from src.api import start_health_server
+from src.tasks.task_queue import get_task_queue, shutdown_task_queue, TaskPriority
 
 
 class AISystem:
@@ -38,11 +43,15 @@ class AISystem:
     Handles AI interactions, tool management, and task execution.
     """
 
-    def __init__(self, voice_mode: bool = None):
+    def __init__(self, voice_mode: bool = None, max_workers: int = 4):
         """Initialize the AI system."""
         self.voice_mode = (
             voice_mode if voice_mode is not None else settings.VOICE_ENABLED
         )
+        self.max_workers = max_workers
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.session = None
+        self.semaphore = asyncio.Semaphore(max_workers)
         self.logger = logger
 
         # Initialize components
@@ -59,6 +68,10 @@ class AISystem:
         # Initialize tools
         self.base_tools = BaseTools(system=self)
         self.voice_tools = VoiceTools(system=self)
+        
+        # Initialize background task queue
+        self.task_queue = get_task_queue(num_workers=4)
+        self.logger.info("Background task queue initialized")
 
         # System context - completely dynamic
         self.context = {
@@ -74,11 +87,35 @@ class AISystem:
         }
 
         self.active = True
+        
+        # Agent management for preventing loops
+        self.agent_usage_history = deque(maxlen=10)  # Track last 10 agent uses
+        self.current_agent = None
+        self.agent_rotation_enabled = True
+        
+        # Error tracking for loop detection
+        self.recent_errors = deque(maxlen=10)  # Track last 10 errors
+        self.error_retry_counts = {}  # Track retry counts per error signature
 
         # Register core tools
         self._register_core_tools()
         self._load_tools_from_files()
+        
+        # Refresh tools from database (handles database recreation)
+        self._refresh_tools_from_database()
+        
         self._get_initial_system_details()
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        self.session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if self.session:
+            await self.session.close()
+        self.executor.shutdown(wait=True)
 
         # Start health monitoring server
         self.health_server = None
@@ -108,6 +145,43 @@ class AISystem:
         self._warmup_caches()
 
         self.logger.success("AI System initialized successfully")
+
+    def _get_running_processes_from_context(self) -> Dict[str, Any]:
+        """Extract information about running processes from context history."""
+        running_processes = {}
+        
+        # Check recent execution history for process information
+        if "last_result" in self.context:
+            last_result = self.context["last_result"]
+            if isinstance(last_result, dict) and "full_result" in last_result:
+                full_result = last_result["full_result"]
+                if isinstance(full_result, dict) and "process_id" in full_result:
+                    process_id = full_result["process_id"]
+                    running_processes[process_id] = {
+                        "process_id": process_id,
+                        "pid": full_result.get("pid"),
+                        "command": full_result.get("command"),
+                        "status": full_result.get("status"),
+                        "timestamp": last_result.get("timestamp")
+                    }
+        
+        # Also check conversation history for process information
+        if "conversation_history" in self.context:
+            for conv in self.context["conversation_history"]:
+                if isinstance(conv, dict) and "ai" in conv:
+                    # Look for process information in AI responses
+                    ai_response = conv["ai"]
+                    if isinstance(ai_response, str) and "process_id" in ai_response.lower():
+                        # Try to extract process information from the response
+                        import re
+                        process_matches = re.findall(r'process[_\s]*id[:\s]*([a-f0-9]{8})', ai_response, re.IGNORECASE)
+                        for process_id in process_matches:
+                            running_processes[process_id] = {
+                                "process_id": process_id,
+                                "source": "conversation_history"
+                            }
+        
+        return running_processes
 
     def _warmup_caches(self):
         """Warm up caches with common data for better performance."""
@@ -381,9 +455,16 @@ class AISystem:
             Tool(
                 name="run_shell_async",
                 code="",
-                doc="Execute shell commands asynchronously for blocking commands like browsers. Usage: run_shell_async(command, timeout=300)",
+                doc="Execute shell commands asynchronously for long-running or blocking commands. Usage: run_shell_async(command, timeout=300)",
                 is_dynamic=False,
                 func=self.base_tools.run_shell_async,
+            ),
+            Tool(
+                name="open_application",
+                code="",
+                doc="Launch GUI applications in background (gedit, firefox, code, etc). PREFERRED over run_shell for apps. Usage: open_application(app_name, args='')",
+                is_dynamic=False,
+                func=self.base_tools.open_application,
             ),
             Tool(
                 name="interact_with_process",
@@ -554,13 +635,6 @@ class AISystem:
                 func=self.base_tools.get_all_windows,
             ),
             Tool(
-                name="focus_window",
-                code="",
-                doc="Focus/activate a specific window by ID, name, or class. Usage: focus_window(window_identifier)",
-                is_dynamic=False,
-                func=self.base_tools.focus_window,
-            ),
-            Tool(
                 name="bring_window_to_front",
                 code="",
                 doc="Dynamically bring any window to the foreground. Usage: bring_window_to_front(window_identifier=None)",
@@ -619,16 +693,30 @@ class AISystem:
             Tool(
                 name="type_text",
                 code="",
-                doc="Type text at specific coordinates or current position. Usage: type_text(text, x=None, y=None)",
+                doc="Type text at specific coordinates or current position. Usage: type_text(text, x=None, y=None, window_title=None, process_name=None)",
                 is_dynamic=False,
                 func=self.base_tools.type_text,
             ),
             Tool(
+                name="focus_window",
+                code="",
+                doc="Focus on a window by title, process name, or process ID. Usage: focus_window(window_title=None, process_name=None, process_id=None)",
+                is_dynamic=False,
+                func=self.base_tools.focus_window,
+            ),
+            Tool(
                 name="press_key",
                 code="",
-                doc="Press key combination. Usage: press_key(key_combination)",
+                doc="Press key combination. Usage: press_key(key)",
                 is_dynamic=False,
                 func=self.base_tools.press_key,
+            ),
+            Tool(
+                name="execute_gui_actions",
+                code="",
+                doc="Execute a list of GUI actions (click, type, key_press). Usage: execute_gui_actions(actions)",
+                is_dynamic=False,
+                func=self.base_tools.execute_gui_actions,
             ),
             Tool(
                 name="generate_structured_output",
@@ -848,7 +936,456 @@ class AISystem:
         for tool in core_tools:
             self.tool_manager.register_tool(tool)
 
+        # Save all registered tools to database
+        self._save_tools_to_database()
+        
         self.logger.success("Core tools registered successfully")
+
+    def _save_tools_to_database(self):
+        """Save all registered tools to the database with complete metadata."""
+        try:
+            self.logger.info("Saving tools to database...")
+            
+            for tool_name, tool in self.tool_manager.tools.items():
+                # Create comprehensive tool metadata
+                tool_metadata = {
+                    "name": tool.name,
+                    "doc": tool.doc,
+                    "is_dynamic": tool.is_dynamic,
+                    "usage_count": getattr(tool, 'usage_count', 0),
+                    "last_used": getattr(tool, 'last_used', 0),
+                    "category": self._categorize_tool(tool),
+                    "parameters": self._extract_tool_parameters(tool),
+                    "examples": self._generate_tool_examples(tool),
+                    "result_formats": self._extract_tool_result_formats(tool),
+                    "registered_at": time.time()
+                }
+                
+                # Save to database
+                self.tool_manager.save_tool_metadata(tool_name, tool_metadata)
+                
+            self.logger.success(f"Saved {len(self.tool_manager.tools)} tools to database")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save tools to database: {e}")
+
+    def _categorize_tool(self, tool) -> str:
+        """Categorize tools based on their functionality and assign to agents."""
+        name = tool.name.lower()
+        doc = tool.doc.lower()
+        
+        # Enhanced categorization with agent assignments
+        if any(keyword in name or keyword in doc for keyword in ['list', 'change_dir', 'find_files', 'navigate', 'search_directory']):
+            return "explorer_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['shell', 'command', 'run', 'read_file', 'write_file', 'create_directory', 'delete_file']):
+            return "executor_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['screen', 'click', 'type', 'mouse', 'scroll', 'drag', 'press_key', 'window']):
+            return "gui_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['search', 'google', 'web', 'analyze', 'url', 'json', 'csv', 'image']):
+            return "analyzer_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['linter', 'process_info', 'disk_usage', 'large_files', 'directory_size', 'system_info']):
+            return "debugger_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['voice', 'speak', 'listen']):
+            return "voice_agent"
+        elif any(keyword in name or keyword in doc for keyword in ['install', 'package', 'dependency']):
+            return "package_agent"
+        else:
+            return "general_agent"
+
+    def _extract_tool_parameters(self, tool) -> list:
+        """Extract parameter information from tool documentation."""
+        import re
+        doc = tool.doc
+        
+        # Look for usage patterns
+        usage_match = re.search(r'Usage:\s*(\w+)\((.*?)\)', doc)
+        if usage_match:
+            params_str = usage_match.group(2)
+            if params_str.strip():
+                # Parse parameters
+                params = []
+                for param in params_str.split(','):
+                    param = param.strip()
+                    if '=' in param:
+                        name, default = param.split('=', 1)
+                        params.append({
+                            "name": name.strip(),
+                            "default": default.strip(),
+                            "required": False
+                        })
+                    else:
+                        params.append({
+                            "name": param.strip(),
+                            "required": True
+                        })
+                return params
+        
+        return []
+
+    def _extract_tool_result_formats(self, tool) -> dict:
+        """Extract success and result format information from tool functions."""
+        import inspect
+        import ast
+        
+        result_formats = {
+            "success_format": {},
+            "error_format": {},
+            "common_fields": []
+        }
+        
+        try:
+            # Get the function source code
+            if hasattr(tool, 'func') and callable(tool.func):
+                source = inspect.getsource(tool.func)
+                
+                # Parse the AST to find return statements
+                tree = ast.parse(source)
+                
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Return) and node.value:
+                        # Analyze return statements
+                        if isinstance(node.value, ast.Dict):
+                            # Extract keys from dictionary return
+                            keys = []
+                            for key_node in node.value.keys:
+                                if isinstance(key_node, ast.Constant):
+                                    keys.append(key_node.value)
+                                elif isinstance(key_node, ast.Str):  # Python < 3.8
+                                    keys.append(key_node.s)
+                            
+                            # Categorize based on common patterns
+                            if "success" in keys:
+                                if any(key in keys for key in ["error", "stderr"]):
+                                    result_formats["error_format"] = {
+                                        "fields": keys,
+                                        "description": "Error return format"
+                                    }
+                                else:
+                                    result_formats["success_format"] = {
+                                        "fields": keys,
+                                        "description": "Success return format"
+                                    }
+                            
+                            # Track common fields
+                            result_formats["common_fields"].extend(keys)
+                
+                # Remove duplicates from common fields
+                result_formats["common_fields"] = list(set(result_formats["common_fields"]))
+                
+        except Exception as e:
+            self.logger.debug(f"Could not extract result formats for {tool.name}: {e}")
+        
+        # Add specific format information for known GUI tools
+        if tool.name in ["type_text", "click_screen", "press_key", "move_mouse", "drag_mouse", "focus_window"]:
+            result_formats["success_format"] = {
+                "fields": ["success", "output", "message", "stderr"],
+                "description": "GUI tool success format with error checking"
+            }
+            result_formats["error_format"] = {
+                "fields": ["success", "error", "output", "stderr"],
+                "description": "GUI tool error format with detailed error info"
+            }
+            result_formats["common_fields"] = ["success", "output", "error", "message", "stderr"]
+        
+        return result_formats
+
+    def _generate_tool_examples(self, tool) -> list:
+        """Generate example usage for tools."""
+        name = tool.name
+        doc = tool.doc
+        
+        # Extract examples from doc or generate based on tool type
+        examples = []
+        
+        # Look for existing examples in documentation
+        import re
+        example_matches = re.findall(r'Example[s]?:?\s*(.+?)(?:\n|$)', doc, re.IGNORECASE)
+        examples.extend(example_matches)
+        
+        # Generate basic examples if none found
+        if not examples:
+            if name == "run_shell":
+                examples = ["run_shell('ls -la')", "run_shell('python script.py')"]
+            elif name == "read_file":
+                examples = ["read_file('config.txt')", "read_file('/path/to/file.py')"]
+            elif name == "write_file":
+                examples = ["write_file('output.txt', 'Hello World')"]
+            elif name == "list_dir":
+                examples = ["list_dir('.')", "list_dir('/home/user')"]
+            elif name == "google_search":
+                examples = ["google_search('python tutorials')", "google_search('AI news', num_results=5)"]
+        
+        return examples
+
+    def _generate_dynamic_tool_descriptions(self) -> str:
+        """Generate comprehensive tool descriptions from database metadata."""
+        try:
+            # Get all tool metadata from database
+            all_metadata = self.tool_manager.get_all_tool_metadata()
+            
+            if not all_metadata:
+                # Fallback to basic tool descriptions if no metadata
+                return "\n".join(
+                    [f"- {tool.name}: {tool.doc}" for tool in self.tool_manager.tools.values()]
+                )
+            
+            # Group tools by category
+            categories = {}
+            for tool_name, metadata in all_metadata.items():
+                category = metadata.get("category", "general")
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append((tool_name, metadata))
+            
+            # Generate comprehensive descriptions
+            descriptions = ["**AVAILABLE TOOLS:**\n"]
+            
+            # Category order for better organization
+            category_order = [
+                "system_commands", "file_operations", "gui_automation", 
+                "web_search", "voice_operations", "package_management", 
+                "system_info", "general"
+            ]
+            
+            for category in category_order:
+                if category in categories:
+                    category_name = category.replace("_", " ").title()
+                    descriptions.append(f"\n**{category_name}:**")
+                    
+                    for tool_name, metadata in categories[category]:
+                        descriptions.append(f"\n🔧 **{tool_name}**")
+                        descriptions.append(f"   📝 {metadata.get('description', self.tool_manager.tools[tool_name].doc if tool_name in self.tool_manager.tools else 'No description')}")
+                        
+                        # Add parameters if available
+                        parameters = metadata.get("parameters", [])
+                        if parameters:
+                            descriptions.append("   📋 Parameters:")
+                            for param in parameters:
+                                param_str = f"     • {param['name']}"
+                                if not param.get("required", True):
+                                    param_str += f" (optional, default: {param.get('default', 'None')})"
+                                else:
+                                    param_str += " (required)"
+                                descriptions.append(param_str)
+                        
+                        # Add examples if available
+                        examples = metadata.get("examples", [])
+                        if examples:
+                            descriptions.append("   💡 Examples:")
+                            for example in examples[:3]:  # Limit to 3 examples
+                                descriptions.append(f"     • {example}")
+                        
+                        # Add usage statistics
+                        usage_count = metadata.get("usage_count", 0)
+                        if usage_count > 0:
+                            descriptions.append(f"   📊 Used {usage_count} times")
+                    
+                    del categories[category]
+            
+            # Add any remaining categories
+            for category, tools in categories.items():
+                category_name = category.replace("_", " ").title()
+                descriptions.append(f"\n**{category_name}:**")
+                for tool_name, metadata in tools:
+                    descriptions.append(f"\n🔧 **{tool_name}**")
+                    descriptions.append(f"   📝 {metadata.get('description', self.tool_manager.tools[tool_name].doc if tool_name in self.tool_manager.tools else 'No description')}")
+            
+            return "\n".join(descriptions)
+            
+        except Exception as e:
+            self.logger.error(f"Error generating dynamic tool descriptions: {e}")
+            # Fallback to basic descriptions
+            return "\n".join(
+                [f"- {tool.name}: {tool.doc}" for tool in self.tool_manager.tools.values()]
+            )
+
+    def _generate_agent_tool_assignments(self) -> str:
+        """Generate dynamic agent tool assignments based on tool categories."""
+        try:
+            # Get all tool metadata from database
+            all_metadata = self.tool_manager.get_all_tool_metadata()
+            
+            if not all_metadata:
+                return "No tools available. System is initializing..."
+            
+            # Group tools by agent category
+            agent_tools = {}
+            for tool_name, metadata in all_metadata.items():
+                agent = metadata.get("category", "general_agent")
+                if agent not in agent_tools:
+                    agent_tools[agent] = []
+                agent_tools[agent].append((tool_name, metadata))
+            
+            # Agent descriptions and emojis
+            agent_info = {
+                "explorer_agent": ("🔍 EXPLORER AGENT", "Discovery and navigation tools"),
+                "executor_agent": ("🛠️ EXECUTOR AGENT", "File operations and system commands"),
+                "gui_agent": ("🎯 GUI AGENT", "Screen interaction and automation tools"),
+                "analyzer_agent": ("📊 ANALYZER AGENT", "Data analysis and web search tools"),
+                "debugger_agent": ("🔧 DEBUGGER AGENT", "System monitoring and debugging tools"),
+                "voice_agent": ("🎤 VOICE AGENT", "Speech recognition and synthesis tools"),
+                "package_agent": ("📦 PACKAGE AGENT", "Package and dependency management"),
+                "general_agent": ("⚙️ GENERAL AGENT", "General purpose tools")
+            }
+            
+            # Generate agent sections
+            descriptions = []
+            
+            # Process agents in priority order
+            agent_order = ["explorer_agent", "executor_agent", "gui_agent", "analyzer_agent", "debugger_agent", "voice_agent", "package_agent", "general_agent"]
+            
+            for agent in agent_order:
+                if agent in agent_tools:
+                    agent_name, agent_desc = agent_info[agent]
+                    descriptions.append(f"\n### **{agent_name}**")
+                    descriptions.append(f"*{agent_desc}*")
+                    
+                    for tool_name, metadata in agent_tools[agent]:
+                        descriptions.append(f"\n🔧 **{tool_name}**")
+                        descriptions.append(f"   📝 {metadata.get('description', self.tool_manager.tools[tool_name].doc if tool_name in self.tool_manager.tools else 'No description')}")
+                        
+                        # Add parameters if available
+                        parameters = metadata.get("parameters", [])
+                        if parameters:
+                            descriptions.append("   📋 Parameters:")
+                            for param in parameters:
+                                param_str = f"     • {param['name']}"
+                                if not param.get("required", True):
+                                    param_str += f" (optional, default: {param.get('default', 'None')})"
+                                else:
+                                    param_str += " (required)"
+                                descriptions.append(param_str)
+                        
+                        # Add examples if available
+                        examples = metadata.get("examples", [])
+                        if examples:
+                            descriptions.append("   💡 Examples:")
+                            for example in examples[:2]:  # Limit to 2 examples per tool
+                                descriptions.append(f"     • {example}")
+                    
+                    del agent_tools[agent]
+            
+            # Add any remaining agents
+            for agent, tools in agent_tools.items():
+                agent_name, agent_desc = agent_info.get(agent, (f"🤖 {agent.upper()}", "Specialized tools"))
+                descriptions.append(f"\n### **{agent_name}**")
+                descriptions.append(f"*{agent_desc}*")
+                
+                for tool_name, metadata in tools:
+                    descriptions.append(f"\n🔧 **{tool_name}**")
+                    descriptions.append(f"   📝 {metadata.get('description', self.tool_manager.tools[tool_name].doc if tool_name in self.tool_manager.tools else 'No description')}")
+            
+            return "\n".join(descriptions)
+            
+        except Exception as e:
+            self.logger.error(f"Error generating agent tool assignments: {e}")
+            return "Error generating agent assignments. Using fallback mode."
+
+    def _suggest_agent_for_task(self, task_description: str) -> str:
+        """Suggest the most appropriate agent for a given task."""
+        task_lower = task_description.lower()
+        
+        # Agent priority mapping based on task keywords
+        agent_keywords = {
+            "explorer_agent": ["explore", "find", "search", "navigate", "discover", "list", "directory"],
+            "executor_agent": ["execute", "run", "create", "write", "delete", "install", "command"],
+            "gui_agent": ["click", "type", "screen", "window", "mouse", "keyboard", "automate", "gui"],
+            "analyzer_agent": ["analyze", "search", "google", "web", "data", "json", "csv", "image"],
+            "debugger_agent": ["debug", "error", "check", "monitor", "system", "process", "disk"],
+            "voice_agent": ["voice", "speak", "listen", "audio", "sound"],
+            "package_agent": ["package", "install", "dependency", "pip", "npm"]
+        }
+        
+        # Find the best matching agent
+        best_agent = "general_agent"
+        max_matches = 0
+        
+        for agent, keywords in agent_keywords.items():
+            matches = sum(1 for keyword in keywords if keyword in task_lower)
+            if matches > max_matches:
+                max_matches = matches
+                best_agent = agent
+        
+        return best_agent
+
+    def _should_rotate_agent(self) -> bool:
+        """Determine if we should rotate to a different agent to prevent loops."""
+        if not self.agent_rotation_enabled or len(self.agent_usage_history) < 3:
+            return False
+        
+        # Check if we've used the same agent too many times recently
+        recent_agents = list(self.agent_usage_history)[-3:]  # Last 3 uses
+        if len(set(recent_agents)) == 1:  # All same agent
+            return True
+        
+        return False
+
+    def _get_alternative_agent(self, current_agent: str) -> str:
+        """Get an alternative agent when rotation is needed."""
+        agent_alternatives = {
+            "explorer_agent": ["executor_agent", "analyzer_agent"],
+            "executor_agent": ["explorer_agent", "debugger_agent"],
+            "gui_agent": ["analyzer_agent", "executor_agent"],
+            "analyzer_agent": ["executor_agent", "explorer_agent"],
+            "debugger_agent": ["executor_agent", "explorer_agent"],
+            "voice_agent": ["executor_agent", "gui_agent"],
+            "package_agent": ["executor_agent", "debugger_agent"],
+            "general_agent": ["explorer_agent", "executor_agent"]
+        }
+        
+        alternatives = agent_alternatives.get(current_agent, ["explorer_agent", "executor_agent"])
+        # Return the first alternative that hasn't been used recently
+        for alt in alternatives:
+            if alt not in list(self.agent_usage_history)[-2:]:
+                return alt
+        
+        return alternatives[0]
+
+    def _update_agent_usage(self, agent: str):
+        """Update agent usage history."""
+        self.agent_usage_history.append(agent)
+        self.current_agent = agent
+
+    def _refresh_tools_from_database(self):
+        """Refresh tool metadata from database, useful when database is recreated."""
+        try:
+            self.logger.info("Refreshing tools from database...")
+            
+            # Get all tools currently registered
+            registered_tools = list(self.tool_manager.tools.keys())
+            
+            # Check which tools need metadata refresh
+            tools_needing_refresh = []
+            for tool_name in registered_tools:
+                metadata = self.tool_manager.get_tool_metadata(tool_name)
+                if not metadata:
+                    tools_needing_refresh.append(tool_name)
+            
+            # Re-save metadata for tools that don't have it
+            if tools_needing_refresh:
+                self.logger.info(f"Refreshing metadata for {len(tools_needing_refresh)} tools...")
+                for tool_name in tools_needing_refresh:
+                    if tool_name in self.tool_manager.tools:
+                        tool = self.tool_manager.tools[tool_name]
+                        tool_metadata = {
+                            "name": tool.name,
+                            "doc": tool.doc,
+                            "is_dynamic": tool.is_dynamic,
+                            "usage_count": getattr(tool, 'usage_count', 0),
+                            "last_used": getattr(tool, 'last_used', 0),
+                            "category": self._categorize_tool(tool),
+                            "parameters": self._extract_tool_parameters(tool),
+                            "examples": self._generate_tool_examples(tool),
+                            "registered_at": time.time()
+                        }
+                        self.tool_manager.save_tool_metadata(tool_name, tool_metadata)
+                
+                self.logger.success(f"Refreshed metadata for {len(tools_needing_refresh)} tools")
+            else:
+                self.logger.info("All tools already have metadata in database")
+                
+        except Exception as e:
+            self.logger.error(f"Error refreshing tools from database: {e}")
 
     def _load_tools_from_files(self):
         """Load tools from files in the tools directory."""
@@ -924,9 +1461,7 @@ Current Request:
 
     def _construct_prompt(self) -> str:
         """Construct the prompt for the AI model."""
-        tool_descriptions = "\n".join(
-            [f"- {tool.name}: {tool.doc}" for tool in self.tool_manager.tools.values()]
-        )
+        tool_descriptions = self._generate_dynamic_tool_descriptions()
 
         # Build context string from context manager (actual context)
         context_string = ""
@@ -1002,6 +1537,18 @@ Current Request:
 - Error: {last_result.get('error', 'None') or 'None'}
 {additional_info}"""
 
+        # Add running processes context
+        running_processes_context = ""
+        running_processes = self._get_running_processes_from_context()
+        if running_processes:
+            running_processes_context = "\n**Currently Running Processes:**\n"
+            for process_id, process_info in running_processes.items():
+                command = process_info.get('command', 'Unknown')
+                pid = process_info.get('pid', 'Unknown')
+                status = process_info.get('status', 'Unknown')
+                running_processes_context += f"- Process ID: {process_id} | PID: {pid} | Command: {command} | Status: {status}\n"
+            running_processes_context += "\n💡 **TIP**: Use these process IDs with focus_window or interact_with_process tools!\n"
+
         # Add last error context
         last_error_context = ""
         if "last_error" in self.context:
@@ -1021,45 +1568,97 @@ Current Request:
         )
 
         prompt_template = f"""
-You are a highly intelligent, autonomous, and self-improving AI system. Your primary objective is to complete the user's request. You have full access to the system and a comprehensive set of tools to achieve any task.
+You are a **Multi-Agent AI System** consisting of specialized agents working together to complete user requests. Each agent has specific expertise and responsibilities, but they collaborate seamlessly to achieve complex tasks.
 
-Your core process is as follows:
-1. **Analyze**: Carefully break down the user's request.
-2. **Recall & Contextualize**: Use your long-term memory and recent conversation history to retrieve relevant context.
-3. **Plan**: Create a detailed, step-by-step plan. Each step must be a single tool call.
-4. **Execute**: Execute the plan, one step at a time.
-5. **Reflect & Improve**: Analyze the output of each tool. If an error occurs, self-heal by creating a new plan to diagnose and fix the issue.
+## 🤖 **AGENT TEAM STRUCTURE:**
 
-**Your Guiding Principles:**
-- Be completely dynamic and adaptive - never assume specific paths, directories, or file locations exist
-- Explore and discover everything dynamically by starting from the current directory
-- Use `run_shell` to execute system commands (with proper quoting for file paths with spaces)
-- Use `read_file` and `write_file` to interact with the file system
-- Use `list_dir` to explore the file system and discover what actually exists
-- Use `change_dir` to navigate to directories you discover
-- Use `find_files` to search for files by pattern (e.g., "*.png", "*.jpg")
-- Use `analyze_image` to analyze any image file you discover
-- Use `read_screen` to capture and analyze the current screen
-- Use `analyze_screen_actions` to get actionable steps with coordinates for completing tasks
-- Use `click_screen` to click at specific screen coordinates (x, y)
-- Use `scroll_screen` to scroll at coordinates (x, y, direction, amount)
-- Use `move_mouse` to move mouse to coordinates (x, y)
-- Use `drag_mouse` to drag from (x1, y1) to (x2, y2)
-- Use `type_text` to type text at coordinates (text, x, y)
-- Use `press_key` to press key combinations
-- Use `get_mouse_position` to get current mouse coordinates
-- Use `run_shell` to execute system commands and open applications
-- Use `install_package` to install Python packages in virtual environment
-- Use `install_system_package` to install system packages using package manager
-- Use `check_system_dependency` to check if system tools are installed and get installation instructions
-- Use `search_directory` to search for text content across multiple files
-- Use `enhanced_web_search` for comprehensive web searches
-- When the entire task is complete, you MUST use the `complete_task` tool with a summary message
-- **CRITICAL**: Do not repeat a failed step. If a step fails, your next plan must be to diagnose the failure and propose a new approach
+### **1. 🧠 COORDINATOR AGENT (Primary)**
+- **Role**: Task analysis, planning, and coordination
+- **Responsibilities**: 
+  - Analyze user requests and break them down
+  - Create comprehensive step-by-step plans
+  - Coordinate between specialized agents
+  - Monitor overall progress and quality
+  - Make final decisions on task completion
+
+### **2. 🔍 EXPLORER AGENT**
+- **Role**: System discovery and navigation
+- **Responsibilities**:
+  - Explore file systems and directories dynamically
+  - Discover available resources and tools
+  - Navigate to required locations
+  - Find files, directories, and system components
+  - Map out system structure and capabilities
+
+### **3. 🛠️ EXECUTOR AGENT**
+- **Role**: Tool execution and command running
+- **Responsibilities**:
+  - Execute shell commands and system operations
+  - Run file operations (read, write, create, delete)
+  - Install packages and dependencies
+  - Execute GUI automation tasks
+  - Handle system-level operations
+
+### **4. 🎯 GUI AGENT**
+- **Role**: Visual interface interaction
+- **Responsibilities**:
+  - Capture and analyze screenshots
+  - Perform mouse and keyboard operations
+  - Interact with applications and windows
+  - Navigate web interfaces and desktop applications
+  - Handle visual element detection and interaction
+
+### **5. 🔧 DEBUGGER AGENT**
+- **Role**: Error resolution and system healing
+- **Responsibilities**:
+  - Analyze errors and failures
+  - Diagnose system issues
+  - Implement fixes and workarounds
+  - Prevent repetitive failures
+  - Optimize system performance
+
+### **6. 📊 ANALYZER AGENT**
+- **Role**: Data analysis and content processing
+- **Responsibilities**:
+  - Analyze images, documents, and data
+  - Process search results and web content
+  - Extract meaningful information
+  - Generate insights and summaries
+  - Handle complex data transformations
+
+## 🔄 **COLLABORATIVE WORKFLOW:**
+
+1. **COORDINATOR** receives user request and analyzes requirements
+2. **EXPLORER** discovers available resources and system state
+3. **COORDINATOR** creates detailed plan with specific agent assignments
+4. **EXECUTOR** handles file operations and system commands
+5. **GUI AGENT** manages visual interactions when needed
+6. **ANALYZER** processes data and content as required
+7. **DEBUGGER** resolves any errors that occur
+8. **COORDINATOR** monitors progress and adjusts plan as needed
+9. **COORDINATOR** confirms task completion and quality
+
+## 🎯 **AGENT COORDINATION RULES:**
+
+- **Dynamic Assignment**: Each agent can take the lead based on task requirements
+- **Seamless Handoff**: Agents pass context and results to each other efficiently
+- **Error Escalation**: When one agent fails, others step in to help
+- **Quality Assurance**: Multiple agents verify results before completion
+- **Adaptive Planning**: Plans adjust based on agent discoveries and capabilities
+
+## 🛠️ **DYNAMIC AGENT TOOL ASSIGNMENTS:**
+
+{self._generate_agent_tool_assignments()}
+
+## 🎯 **CORE PRINCIPLES:**
 - **DYNAMIC**: Never hardcode paths - always explore and discover what exists
 - **ADAPTIVE**: Work with whatever you find, don't assume anything exists
-- **EXPLORATION**: Start from current directory and systematically explore to find what you need
-- **NAVIGATION**: When you find a directory you need to explore, use `change_dir` to navigate to it, then use `list_dir` to see its contents
+- **COLLABORATIVE**: Agents work together seamlessly and rotate to prevent loops
+- **EFFICIENT**: Use the right agent for the right task, but switch agents when stuck
+- **SELF-HEALING**: Debugger agent resolves issues automatically
+- **QUALITY-FOCUSED**: Multiple agents verify results
+- **ANTI-LOOP**: If an agent fails repeatedly, switch to an alternative agent
+- **TOOL-AGNOSTIC**: Use any available tool from any agent as needed
 
 **File and Directory Creation Rules:**
 {self._get_system_rules()}
@@ -1084,31 +1683,59 @@ ALWAYS start your exploration from the OS root directories and work your way dow
 
 **Navigation Rules:**
 1. ALWAYS start from the OS root directory (C:\\Users, /home, /Users)
-2. Use `navigate_to_user_directories` to automatically find and navigate to common user directories
-3. Use `list_dir` to see what's available at each level
+2. Use Explorer Agent tools to automatically find and navigate to common user directories
+3. Use directory listing tools to see what's available at each level
 4. Navigate step by step: root → username → Pictures → Screenshots
 5. If a directory doesn't exist, try alternative paths
-6. Use `find_files` with patterns like "*.png", "*.jpg" to locate images
+6. Use file search tools with patterns like "*.png", "*.jpg" to locate images
 
 **Quick Start for Image/Screenshot Tasks:**
-1. Use `navigate_to_user_directories` to automatically find Pictures/Screenshots directories
-2. Use `list_dir` to see what's in the current directory
-3. Use `find_files` with "*.png" or "*.jpg" to find image files
-4. Use `analyze_image` to analyze any found images or `read_screen` to capture and analyze current screen
+1. Use Explorer Agent tools to automatically find Pictures/Screenshots directories
+2. Use directory listing tools to see what's in the current directory
+3. Use file search tools with "*.png" or "*.jpg" to find image files
+4. Use appropriate analysis tools to analyze any found images or capture current screen
 
 **Key Navigation Strategy:**
-1. First, use `list_dir` to see what's in the current directory
-2. If you see a directory you need to explore (like "screenshots", "Pictures", "Desktop"), use `change_dir` to navigate to it
-3. Then use `list_dir` again to see what's inside that directory
-4. Use `find_files` with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif" to find image files
-5. Use `analyze_image` to analyze any image you find or `read_screen` to capture and analyze current screen
-6. If you need to find specific content, use `search_directory` to search across multiple files
+1. First, use directory listing tools to see what's in the current directory
+2. If you see a directory you need to explore (like "screenshots", "Pictures", "Desktop"), use navigation tools to go to it
+3. Then use directory listing tools again to see what's inside that directory
+4. Use file search tools with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif" to find image files
+5. Use appropriate analysis tools to analyze any image you find or capture current screen
+6. If you need to find specific content, use search tools to search across multiple files
 
 **Dynamic Discovery Examples:**
 - For screenshots: Look in Desktop, Pictures, Downloads, or any folder with "screenshot" in the name
-- For images: Use `find_files` with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.webp"
-- For documents: Look in Documents, Desktop, or use `find_files` with "*.pdf", "*.doc", "*.txt"
-- For code: Look for folders with "src", "code", "project" in the name, or use `find_files` with "*.py", "*.js", "*.html"
+- For images: Use file search tools with patterns like "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.webp"
+- For documents: Look in Documents, Desktop, or use file search tools with "*.pdf", "*.doc", "*.txt"
+- For code: Look for folders with "src", "code", "project" in the name, or use file search tools with "*.py", "*.js", "*.html"
+
+## 🚀 **MULTI-AGENT EXECUTION INSTRUCTIONS:**
+
+When creating plans, assign specific agents to each step:
+
+**Format for each step:**
+```json
+{{
+  "step": "AGENT_NAME: Brief description of what this agent will do",
+  "action": "tool_name",
+  "args": {{}}
+}}
+```
+
+**Example Agent Assignments:**
+- `"step": "EXPLORER: Discover available directories and files"`
+- `"step": "EXECUTOR: Remove the specified files using rm command"`
+- `"step": "GUI AGENT: Capture screenshot to verify current state"`
+- `"step": "ANALYZER: Process the search results and extract key information"`
+- `"step": "DEBUGGER: Diagnose why the previous command failed"`
+
+**Agent Selection Guidelines:**
+- **EXPLORER**: Use for discovery, navigation, finding files/directories
+- **EXECUTOR**: Use for file operations, shell commands, installations
+- **GUI AGENT**: Use for visual interactions, screenshots, mouse/keyboard
+- **ANALYZER**: Use for data processing, content analysis, search results
+- **DEBUGGER**: Use for error resolution, system diagnostics, fixes
+- **COORDINATOR**: Use for planning, monitoring, final decisions
 
 **Available Tools:**
 {tool_descriptions}
@@ -1124,85 +1751,85 @@ ALWAYS start your exploration from the OS root directories and work your way dow
 
 {last_result_context}
 
+{running_processes_context}
+
 {last_error_context}
 
+## 🎯 **MULTI-AGENT EXECUTION GUIDELINES:**
+
+### **COORDINATOR AGENT Responsibilities:**
+- Analyze user requests and create comprehensive plans
+- Assign specific agents to each step based on task requirements
+- Monitor overall progress and quality
+- Make final decisions on task completion
+- Coordinate between agents when handoffs are needed
+
+### **AGENT COLLABORATION RULES:**
+- **Seamless Handoffs**: Each agent builds on previous agent's work
+- **Context Sharing**: Agents share relevant information with each other
+- **Error Escalation**: When one agent fails, others step in to help
+- **Quality Verification**: Multiple agents verify results before completion
+- **Adaptive Planning**: Plans adjust based on agent discoveries
+
+### **EFFICIENT EXECUTION:**
+- Use the right agent for the right task
+- Avoid repetitive commands and actions
+- Learn from previous failures and successes
+- Complete the full intent, not just the first step
+- Verify results by checking actual outcomes
+
+### **DYNAMIC APPROACH:**
+- Never hardcode paths or assumptions
+- Explore and discover everything dynamically
+- Adapt to whatever you find in the system
+- Use context from previous steps to inform next actions
+- Try different approaches when something fails
+
+**Current User Request:**
 {initial_goal_text}
-Current Status:
-{self.context.get('status', 'No specific status. Ready for a new task or step.')}
 
-**IMPORTANT CONTEXT AWARENESS:**
-- Always check the "Last Tool Execution" section to see what the previous step did
-- If the last step was successful, use its output to inform your next action
-- If the last step failed, analyze the error and create a plan to fix it
-- Never repeat the same failed step - always try a different approach
-- Use the execution history to understand what has been tried before
+**COORDINATOR AGENT**: Please analyze the user's request and create a detailed multi-agent plan. Assign specific agents to each step and ensure the plan addresses the complete user intent. Remember to be dynamic, adaptive, and efficient in your approach.
 
-**INTELLIGENT DYNAMIC WORKFLOW:**
-- ALWAYS use `check_browser_status` first to see what applications are running
-- If an application is running but not active, use `focus_window` to activate it
-- Only open new application instances if no relevant app is running
-- Use `run_shell` to execute system commands and open applications
-- For web tasks: check browser status first, then either activate existing or open new
-- Use `read_screen` to see what's actually on screen
-- NEVER get stuck in loops - if a tool fails 2-3 times, try a completely different approach
-- Always adapt to what's actually present, not what you assume should be there
+**CRITICAL REQUIREMENTS:**
+1. **MUST use agent assignments**: Every step must start with "AGENT_NAME: description"
+2. **MUST be efficient**: No repetitive commands or unnecessary steps
+3. **MUST complete tasks**: Use complete_task tool when finished
+4. **MUST be dynamic**: Adapt to what you find, don't assume anything exists
+5. **MUST prevent infinite loops**: Only avoid truly repetitive patterns (same command 3+ times in a row)
+6. **MUST show results**: Display actual content from searches, file reads, and analysis
+7. **MUST handle multi-step tasks**: If task has "and", "then", or multiple actions, execute ALL steps
+8. **MUST handle complex projects**: For project creation, create all necessary files and directories systematically
+9. **MUST use proper project structure**: Organize files in logical directories (templates/, static/, models/, etc.)
 
-**INTELLIGENT WINDOW MANAGEMENT:**
-1. Use `get_active_window` to see what window is currently focused
-2. Use `get_all_windows` to see all available windows and their details (shows ID, name, class)
-3. Use `focus_window` to focus a specific window by ID, name, or class
-4. Use `bring_window_to_front` to intelligently bring relevant windows to front
-5. Always check window status before taking screenshots to ensure correct content
-6. **IMPORTANT**: When you get window information, USE IT! Don't call get_all_windows repeatedly
-7. Look for browser windows by checking window names/classes for terms like 'browser', 'web', 'mozilla', 'webkit'
-8. Use the window ID or exact name from get_all_windows output to focus the correct window
-
-**DYNAMIC APPLICATION HANDLING:**
-1. Use `check_browser_status` to see what applications are running
-2. If applications are running but not active, use window management tools to focus them
-3. If no relevant app is running, use `run_shell_async` for blocking commands
-4. Use `run_shell_async` for any command that might block (GUI apps, etc.)
-5. Use `run_shell` for quick commands that return immediately
-6. Use `interact_with_process` to check status, send input, or get output from running processes
-7. Wait for applications to load before taking screenshots
-8. Use `read_screen` to understand the current state
-9. Adapt to any application or website dynamically
-10. If something fails, try a completely different approach
-
-**INTELLIGENT PROJECT HANDLING:**
-1. Navigate to project directories using `change_dir` when working on specific projects
-2. Use appropriate tools and environments for the task at hand
-3. Handle directory paths with spaces by using proper quoting in commands
-4. Work from the appropriate directory for the specific task
-5. Adapt to whatever project structure you find
-
-**INTELLIGENT TASK EXECUTION:**
-- Understand the user's intent from their request
-- Break down complex tasks into logical, sequential steps
-- Use screen analysis to determine what actions are needed
-- Adapt the approach based on what's actually visible
-- Complete the full intent, not just the first obvious step
-- Verify results by checking the actual outcome
-- If a step fails, analyze the error and try a different approach
-- Don't repeat the same failed action - always try something new
-- Use context from previous successful steps to inform next actions
-
-**INTELLIGENT ERROR HANDLING:**
-- When errors occur, analyze the specific error message
-- Try alternative approaches rather than repeating failed actions
-- Use context from previous successful steps to guide error resolution
-- If a directory/file already exists, handle it intelligently (remove and recreate, or use different name)
-- If a command is not found, try alternative commands or install missing dependencies
-- Always provide meaningful progress updates to the user
-- If coordinate errors occur, try typing without coordinates or using fallback coordinates
-- If window focus fails, try different window identifiers or open new applications
-- Complete the full task intent, not just the first step
+**Example proper format:**
+```json
+{{
+  "plan": [
+    {{
+      "step": "EXPLORER: Discover current directory contents",
+      "action": "list_dir",
+      "args": {{"path": "."}}
+    }},
+    {{
+      "step": "COORDINATOR: Complete the listing task",
+      "action": "complete_task", 
+      "args": {{"message": "Successfully listed directory contents"}}
+    }}
+  ]
+}}
+```
 
 **ASYNC PROCESS MANAGEMENT:**
 - `run_shell_async(command, timeout=0)` - Start process in background, returns process_id immediately
 - `interact_with_process(process_id, "status")` - Check if process is still running
 - `interact_with_process(process_id, "get_output")` - Get real-time output from process
-- `interact_with_process(process_id, "send_input", data)` - Send input to process
+
+**GUI AUTOMATION EXECUTION:**
+- Use GUI Agent tools to analyze screen AND automatically execute actions
+- Execute GUI actions directly when coordinates are known
+- For GUI tasks: Use screen analysis tools first - they will both analyze and execute automatically
+- The system now actually performs clicks, typing, and key presses instead of just analyzing
+- Use process interaction tools to send input to running processes
 - `interact_with_process(process_id, "kill")` - Terminate the process
 
 **DYNAMIC INTERACTION RULES:**
@@ -1266,7 +1893,13 @@ Always return a valid JSON object.
             self.logger.debug(f"Processing Request: {user_input}")
             print(f"\n🔄 Processing: {user_input}")
 
-            while True:
+            max_retries = 5  # Limit retries to prevent infinite loops
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                retry_count += 1
+                self.logger.debug(f"Attempt {retry_count}/{max_retries}")
+                
                 prompt = self._construct_prompt()
                 response_text = self._gemini_request(prompt)
 
@@ -1287,9 +1920,16 @@ Always return a valid JSON object.
                     break
 
                 # Execute plan
-                if self._execute_plan(plan_data):
+                execution_result = self._execute_plan(plan_data)
+                if execution_result:
                     success = True
                     break
+                else:
+                    # Check if we've reached max retries
+                    if retry_count >= max_retries:
+                        self.logger.error(f"Max retries ({max_retries}) reached. Stopping execution.")
+                        self.context["status"] = f"Task failed after {max_retries} attempts. Please provide more specific instructions or try a different approach."
+                        break
 
         except Exception as e:
             error_type = type(e).__name__
@@ -1305,6 +1945,278 @@ Always return a valid JSON object.
                 metrics_collector.increment_counter("requests_completed")
             else:
                 metrics_collector.increment_counter("requests_failed")
+
+    async def process_request_async(self, user_input: str) -> Dict[str, Any]:
+        """Process requests asynchronously with better performance."""
+        start_time = time.time()
+
+        try:
+            # Run multiple tasks concurrently
+            tasks = [
+                self._analyze_request_async(user_input),
+                self._check_context_async(),
+                self._prepare_tools_async(),
+                self._validate_input_async(user_input),
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            analysis_result = (
+                results[0] if not isinstance(results[0], Exception) else None
+            )
+            context_result = (
+                results[1] if not isinstance(results[1], Exception) else None
+            )
+            tools_result = results[2] if not isinstance(results[2], Exception) else None
+            validation_result = (
+                results[3] if not isinstance(results[3], Exception) else None
+            )
+
+            # Validate input
+            if not validation_result:
+                return {"success": False, "error": "Input validation failed"}
+
+            # Generate plan asynchronously
+            plan = await self._generate_plan_async(
+                user_input, analysis_result, context_result
+            )
+
+            if not plan:
+                return {"success": False, "error": "Failed to generate plan"}
+
+            # Execute plan asynchronously
+            execution_result = await self._execute_plan_async(plan)
+
+            duration = time.time() - start_time
+            self.logger.info(f"Request processed in {duration:.2f} seconds")
+
+            return {
+                "success": True,
+                "result": execution_result,
+                "duration": duration,
+                "plan": plan,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error in async request processing: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _analyze_request_async(self, user_input: str) -> Optional[Dict[str, Any]]:
+        """Analyze request asynchronously."""
+        try:
+            # Run CPU-intensive analysis in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.executor, self._analyze_request_sync, user_input
+            )
+            return result
+        except Exception as e:
+            self.logger.error(f"Error in async request analysis: {e}")
+            return None
+
+    def _analyze_request_sync(self, user_input: str) -> Dict[str, Any]:
+        """Synchronous request analysis."""
+        # Simple analysis logic - can be enhanced
+        return {
+            "intent": "general",
+            "complexity": len(user_input.split()),
+            "requires_tools": True,
+        }
+
+    async def _check_context_async(self) -> Optional[Dict[str, Any]]:
+        """Check context asynchronously."""
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.executor, self.context_manager.get_context_summary
+            )
+            return result
+        except Exception as e:
+            self.logger.error(f"Error in async context check: {e}")
+            return None
+
+    async def _prepare_tools_async(self) -> Optional[Dict[str, Any]]:
+        """Prepare tools asynchronously."""
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.executor,
+                lambda: {"available_tools": list(self.tool_manager.tools.keys())},
+            )
+            return result
+        except Exception as e:
+            self.logger.error(f"Error in async tool preparation: {e}")
+            return None
+
+    async def _validate_input_async(self, user_input: str) -> bool:
+        """Validate input asynchronously."""
+        try:
+            # Basic validation
+            if not user_input or not user_input.strip():
+                return False
+
+            # Check for dangerous patterns
+            dangerous_patterns = ["<script", "javascript:", "eval("]
+            for pattern in dangerous_patterns:
+                if pattern in user_input.lower():
+                    return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in async input validation: {e}")
+            return False
+
+    async def _generate_plan_async(
+        self, user_input: str, analysis: Optional[Dict], context: Optional[Dict]
+    ) -> Optional[Dict[str, Any]]:
+        """Generate plan asynchronously."""
+        try:
+            # Create prompt
+            prompt = self._construct_prompt()
+
+            # Make async API call
+            response = await self._make_async_api_call(prompt)
+
+            if response:
+                return self._parse_response(response)
+
+            return None
+        except Exception as e:
+            self.logger.error(f"Error in async plan generation: {e}")
+            return None
+
+    async def _make_async_api_call(self, prompt: str) -> Optional[str]:
+        """Make async API call to Gemini."""
+        try:
+            async with self.semaphore:  # Limit concurrent API calls
+                if not self.session:
+                    self.session = aiohttp.ClientSession()
+
+                headers = {
+                    "Content-Type": "application/json",
+                }
+
+                data = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 8192,
+                    },
+                }
+
+                url = f"{self.gemini_client.base_url}/models/{self.gemini_client.api_key}:generateContent?key={self.gemini_client.current_api_key}"
+
+                async with self.session.post(
+                    url, headers=headers, json=data
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return (
+                            result.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [{}])[0]
+                            .get("text", "")
+                        )
+                    else:
+                        self.logger.error(f"API call failed with status {response.status}")
+                        return None
+
+        except Exception as e:
+            self.logger.error(f"Error in async API call: {e}")
+            return None
+
+    async def _execute_plan_async(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute plan asynchronously."""
+        try:
+            steps = plan.get("plan", [])
+            results = []
+
+            # Execute steps concurrently where possible
+            for step in steps:
+                result = await self._execute_step_async(step)
+                results.append(result)
+
+                # If step failed, stop execution
+                if not result.get("success", False):
+                    break
+
+            return {
+                "success": all(r.get("success", False) for r in results),
+                "results": results,
+                "total_steps": len(steps),
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error in async plan execution: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _execute_step_async(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single step asynchronously."""
+        try:
+            action = step.get("action")
+            args = step.get("args", {})
+
+            if action not in self.tool_manager.tools:
+                return {"success": False, "error": f"Tool '{action}' not found"}
+
+            tool = self.tool_manager.tools[action]
+
+            # Run tool execution in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.executor, lambda: tool.func(**args)
+            )
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error in async step execution: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def run_async(self):
+        """Run the async AI system."""
+        try:
+            async with self:
+                self.logger.info("Async AI System started")
+
+                while self.active:
+                    try:
+                        user_input = await self._get_user_input_async()
+                        if user_input.lower() in ["exit", "quit", "stop"]:
+                            break
+
+                        result = await self.process_request_async(user_input)
+                        await self._display_result_async(result)
+
+                    except KeyboardInterrupt:
+                        break
+                    except Exception as e:
+                        self.logger.error(f"Error in async main loop: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Critical error in async system: {e}")
+        finally:
+            self.logger.info("Async AI System stopped")
+
+    async def _get_user_input_async(self) -> str:
+        """Get user input asynchronously."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, input, "> ")
+
+    async def _display_result_async(self, result: Dict[str, Any]):
+        """Display result asynchronously."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(self.executor, self._display_result_sync, result)
+
+    def _display_result_sync(self, result: Dict[str, Any]):
+        """Synchronous result display."""
+        if result.get("success"):
+            print(f"✅ Task completed successfully")
+            if "duration" in result:
+                print(f"⏱️  Duration: {result['duration']:.2f} seconds")
+        else:
+            print(f"❌ Task failed: {result.get('error', 'Unknown error')}")
 
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
         """Parse AI response and extract plan with comprehensive validation."""
@@ -1390,15 +2302,17 @@ Always return a valid JSON object.
                 # Check for potentially problematic patterns (but allow legitimate retries)
                 step_desc = step.get("step", "").lower()
                 # Only block if it's clearly a repetitive retry without new information
-                if (
-                    ("again" in step_desc or "retry" in step_desc)
-                    and "previous" in step_desc
-                    and not any(word in step_desc for word in ["new", "different", "alternative", "fix", "resolve", "install", "remove", "check", "click", "type", "search", "play", "video"])
-                ):
-                    return {
-                        "valid": False,
-                        "error": f"Step {i+1} contains repetitive retry language - try a different approach",
-                    }
+                # Check for retry patterns but allow legitimate actions
+                if ("again" in step_desc or "retry" in step_desc) and "previous" in step_desc:
+                    # Allow if the step is substantial (more than just retry language)
+                    # This prevents blocking legitimate requests while still catching pure retry loops
+                    is_substantive = len(step_desc.split()) > 4
+                    
+                    if not is_substantive:
+                        return {
+                            "valid": False,
+                            "error": f"Step {i+1} contains repetitive retry language - try a different approach",
+                        }
 
                 # Check for window management loops
                 if tool_name in ["focus_window", "bring_window_to_front", "get_all_windows"] and i > 0:
@@ -1414,14 +2328,48 @@ Always return a valid JSON object.
                             "error": f"Step {i+1} creates window management loop - avoid consecutive window operations",
                         }
                 
-                # Check for excessive get_all_windows calls
+                # No limits on window management - system should be able to check windows as needed
+                # Only check for truly excessive patterns (infinite loops)
                 if tool_name == "get_all_windows":
                     window_calls = sum(1 for step in plan_data["plan"][:i+1] if step.get("action") == "get_all_windows")
-                    if window_calls > 2:
+                    if window_calls > 20:
                         return {
                             "valid": False,
-                            "error": f"Step {i+1} - too many get_all_windows calls ({window_calls}), use the window information already obtained",
+                            "error": f"Step {i+1} - potential infinite loop with get_all_windows calls ({window_calls})",
                         }
+                
+                # Only check for truly repetitive patterns (same exact command 3 times in a row)
+                if i >= 2:
+                    prev_step = plan_data["plan"][i - 1]
+                    prev_prev_step = plan_data["plan"][i - 2]
+                    if (prev_step.get("action") == tool_name and 
+                        prev_prev_step.get("action") == tool_name and
+                        prev_step.get("args") == step.get("args") and
+                        prev_prev_step.get("args") == step.get("args")):
+                        return {
+                            "valid": False,
+                            "error": f"Step {i+1} repeats the same command 3 times in a row - try a different approach",
+                        }
+                
+                # No limits on tool usage - system should be able to handle any complexity
+                # Only check for truly problematic patterns like infinite loops
+                action_count = sum(1 for s in plan_data["plan"][:i+1] if s.get("action") == tool_name)
+                # Only block if there are more than 50 calls to the same tool (infinite loop detection)
+                if action_count > 50:
+                    return {
+                        "valid": False,
+                        "error": f"Step {i+1} - potential infinite loop detected with {tool_name} ({action_count} calls)",
+                    }
+                
+                # Check for proper agent format (relaxed validation for dynamic agents)
+                step_desc = step.get("step", "")
+                # Allow any format that contains agent-like keywords or is descriptive
+                agent_keywords = ["agent", "coordinator", "explorer", "executor", "gui", "debugger", "analyzer", "system", "tool"]
+                if not any(keyword in step_desc.lower() for keyword in agent_keywords) and len(step_desc.split()) < 3:
+                    return {
+                        "valid": False,
+                        "error": f"Step {i+1} should have a descriptive format with agent context",
+                    }
 
             # Validate comment field if present
             if "comment" in plan_data and not isinstance(plan_data["comment"], str):
@@ -1665,6 +2613,31 @@ Always return a valid JSON object.
             }
             self.context["execution_history"].append(execution_entry)
 
+            # Auto-completion logic for simple tasks
+            if result.get("success"):
+                initial_goal = self.context.get("initial_goal", "").lower()
+                
+                # Check if the task is a simple listing task and has been completed
+                if action == "list_dir" and any(keyword in initial_goal for keyword in ["list", "files", "directory", "contents", "show"]):
+                    if "then" not in initial_goal and "and" not in initial_goal:
+                        self.base_tools.complete_task("Successfully listed directory contents.")
+                        return True
+                
+                # Auto-completion for get_mouse_position
+                if action == "get_mouse_position" and "mouse position" in initial_goal:
+                    self.base_tools.complete_task("Successfully retrieved mouse position.")
+                    return True
+                
+                # Auto-completion for type_text
+                if action == "type_text" and "type" in initial_goal and "at coordinates" in initial_goal:
+                    self.base_tools.complete_task(f"Successfully typed text: {args.get('text', '')}")
+                    return True
+                
+                # Auto-completion for get_system_info
+                if action == "get_system_info" and "system info" in initial_goal:
+                    self.base_tools.complete_task("Successfully retrieved system information.")
+                    return True
+
             if output_text == "TASK_COMPLETED_SIGNAL":
                 print(f"\n{'🎉'*20}")
                 print(f"🎉 TASK COMPLETED SUCCESSFULLY! 🎉")
@@ -1690,6 +2663,12 @@ Always return a valid JSON object.
                     )
                 elif action in ["get_all_windows", "get_active_window", "focus_window"]:
                     # For window tools, show full output as it's essential for debugging
+                    print(f"📊 Result: {output_text}")
+                elif action in ["enhanced_web_search", "google_search", "google_search_news"]:
+                    # For search tools, show full output as it contains important information
+                    print(f"📊 Result: {output_text}")
+                elif action in ["read_file", "read_json_file", "read_csv_file"]:
+                    # For file reading tools, show full output as it contains the file content
                     print(f"📊 Result: {output_text}")
                 else:
                     # For other tools, show truncated output
@@ -1818,6 +2797,10 @@ Always return a valid JSON object.
         if self.health_server:
             self.health_server.stop()
             self.logger.info("Health server stopped")
+        
+        # Stop background task queue
+        shutdown_task_queue()
+        self.logger.info("Task queue stopped")
 
         self.memory_manager.close()
         self.tool_manager.close()
@@ -1835,6 +2818,47 @@ Always return a valid JSON object.
     ) -> bool:
         """Attempt to automatically resolve common errors with enhanced context awareness."""
         self.logger.info(f"🔧 Attempting error resolution for: {error_msg}")
+        
+        # Create error signature for tracking
+        error_signature = hashlib.md5(f"{tool_name}:{error_msg}".encode()).hexdigest()[:12]
+        
+        # Track this error
+        self.recent_errors.append({
+            "signature": error_signature,
+            "tool": tool_name,
+            "args": args,
+            "error": error_msg,
+            "timestamp": time.time()
+        })
+        
+        # Increment retry count for this error
+        self.error_retry_counts[error_signature] = self.error_retry_counts.get(error_signature, 0) + 1
+        
+        # Detect error loops - if same error repeated 3+ times in last 5 attempts
+        recent_signatures = [e["signature"] for e in list(self.recent_errors)[-5:]]
+        same_error_count = recent_signatures.count(error_signature)
+        
+        if same_error_count >= 3:
+            self.logger.error(f"🔁 ERROR LOOP DETECTED: Same error repeated {same_error_count} times!")
+            self.logger.warning(f"🚫 Stopping repetitive attempts for: {tool_name}")
+            self.logger.info("💡 Suggestion: This approach isn't working. Try a different method or skip this step.")
+            
+            # Clear this error from retry counts to prevent future attempts
+            if error_signature in self.error_retry_counts:
+                del self.error_retry_counts[error_signature]
+            
+            # Provide helpful context
+            if "argument error" in error_msg or "unexpected keyword argument" in error_msg:
+                self.logger.warning(f"💡 Function signature issue detected. The function may not support the arguments being passed.")
+                self.logger.info(f"   Tool: {tool_name}")
+                self.logger.info(f"   Args attempted: {list(args.keys())}")
+            
+            return False  # Don't attempt resolution for looping errors
+        
+        # If we've tried resolving this specific error 2+ times, don't try again
+        if self.error_retry_counts.get(error_signature, 0) > 2:
+            self.logger.warning(f"⚠️ Already attempted to resolve this error {self.error_retry_counts[error_signature]} times. Skipping resolution.")
+            return False
 
         # Check if we have context from previous successful steps
         last_successful_result = None
@@ -2392,3 +3416,15 @@ Always return a valid JSON object.
 
         self.logger.warning(f"❌ Could not auto-resolve error: {error_msg}")
         return False
+
+
+# Convenience function for running async system
+async def run_async_ai_system():
+    """Run the async AI system."""
+    async_system = AISystem()
+    await async_system.run_async()
+
+
+if __name__ == "__main__":
+    # Run async system by default
+    asyncio.run(run_async_ai_system())

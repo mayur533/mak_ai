@@ -128,8 +128,57 @@ class MemoryManager:
         )"""
         )
 
+        # Create tool metadata table for enhanced tool information
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS tool_metadata (
+            name TEXT PRIMARY KEY,
+            category TEXT,
+            parameters TEXT,
+            examples TEXT,
+            result_formats TEXT,
+            usage_count INTEGER DEFAULT 0,
+            registered_at REAL,
+            last_updated REAL,
+            FOREIGN KEY (name) REFERENCES tools (name)
+        )"""
+        )
+
+        # Create indexes for better query performance
+        logger.info("Creating database indexes for optimized performance...")
+        
+        # Index on memory timestamp for faster recent memory queries
+        cursor.execute(
+            """CREATE INDEX IF NOT EXISTS idx_memory_timestamp 
+            ON memory(timestamp DESC)"""
+        )
+        
+        # Index on tool last_used for tool usage tracking
+        cursor.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tools_last_used 
+            ON tools(last_used DESC)"""
+        )
+        
+        # Index on execution history timestamp
+        cursor.execute(
+            """CREATE INDEX IF NOT EXISTS idx_execution_timestamp 
+            ON execution_history(timestamp DESC)"""
+        )
+        
+        # Index on tool_metadata category for filtering
+        cursor.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tool_metadata_category 
+            ON tool_metadata(category)"""
+        )
+        
+        # Index on tool_metadata usage_count for popular tools
+        cursor.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tool_metadata_usage 
+            ON tool_metadata(usage_count DESC)"""
+        )
+
         self.db.commit()
-        logger.success("Database initialized successfully.")
+        logger.success("Database initialized successfully with optimized indexes.")
 
     def _load_memory(self):
         """Load memory items from database into memory."""
@@ -297,12 +346,92 @@ class ToolManager:
             )
             self.db.commit()
 
+    def save_tool_metadata(self, name: str, metadata: Dict[str, Any]):
+        """Save enhanced tool metadata to database."""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO tool_metadata 
+                (name, category, parameters, examples, result_formats, usage_count, registered_at, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    metadata.get("category", "general"),
+                    json.dumps(metadata.get("parameters", [])),
+                    json.dumps(metadata.get("examples", [])),
+                    json.dumps(metadata.get("result_formats", {})),
+                    metadata.get("usage_count", 0),
+                    metadata.get("registered_at", time.time()),
+                    time.time()
+                )
+            )
+            self.db.commit()
+            logger.debug(f"Saved metadata for tool '{name}'")
+        except Exception as e:
+            logger.error(f"Failed to save metadata for tool '{name}': {e}")
+
+    def get_tool_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get enhanced tool metadata from database."""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute(
+                "SELECT category, parameters, examples, result_formats, usage_count, registered_at, last_updated FROM tool_metadata WHERE name = ?",
+                (name,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                return {
+                    "name": name,
+                    "category": result[0],
+                    "parameters": json.loads(result[1]) if result[1] else [],
+                    "examples": json.loads(result[2]) if result[2] else [],
+                    "result_formats": json.loads(result[3]) if result[3] else {},
+                    "usage_count": result[4],
+                    "registered_at": result[5],
+                    "last_updated": result[6]
+                }
+        except Exception as e:
+            logger.error(f"Failed to get metadata for tool '{name}': {e}")
+        
+        return None
+
+    def get_all_tool_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Get metadata for all tools."""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute(
+                "SELECT name, category, parameters, examples, result_formats, usage_count, registered_at, last_updated FROM tool_metadata"
+            )
+            
+            metadata_dict = {}
+            for row in cursor.fetchall():
+                name = row[0]
+                metadata_dict[name] = {
+                    "name": name,
+                    "category": row[1],
+                    "parameters": json.loads(row[2]) if row[2] else [],
+                    "examples": json.loads(row[3]) if row[3] else [],
+                    "result_formats": json.loads(row[4]) if row[4] else {},
+                    "usage_count": row[5],
+                    "registered_at": row[6],
+                    "last_updated": row[7]
+                }
+            
+            return metadata_dict
+        except Exception as e:
+            logger.error(f"Failed to get all tool metadata: {e}")
+            return {}
+
     def remove_tool(self, name: str) -> bool:
         """Remove a tool."""
         if name in self.tools:
             del self.tools[name]
             cursor = self.db.cursor()
             cursor.execute("DELETE FROM tools WHERE name = ?", (name,))
+            cursor.execute("DELETE FROM tool_metadata WHERE name = ?", (name,))
             self.db.commit()
             logger.info(f"Tool '{name}' removed.")
             return True

@@ -132,6 +132,7 @@ class GoogleSearchTool:
                     "raw_response": search_result,
                     "text_with_citations": text_with_citations,
                     "web_search_queries": web_search_queries,
+                    "output": text_with_citations,  # Add this so the system displays the actual content
                     "grounding_metadata": grounding_metadata,
                 }
             else:

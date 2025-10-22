@@ -315,16 +315,35 @@ class ContextManager:
         return "\n".join(summary_parts)
 
     def create_project(self, project_name: str, project_path: str) -> str:
-        """Create a new project context."""
+        """
+        Create a new project context or return existing one.
+        Prevents duplicate projects with the same name and path.
+        """
+        # Normalize project path for comparison
+        normalized_path = os.path.abspath(project_path)
+        
+        # Check if a project with the same name and path already exists
+        for proj_id, project in self.projects.items():
+            if project.project_name == project_name and os.path.abspath(project.project_path) == normalized_path:
+                # Found existing project - update it and return
+                project.last_accessed = time.time()
+                project.is_active = True
+                self.current_project = project
+                self._save_projects()
+                self._save_context()
+                self.logger.info(f"Found existing project '{project_name}' at {project_path}, reusing it")
+                return proj_id
+        
+        # No existing project found - create new one
         project_id = f"proj_{int(time.time())}_{hashlib.md5(project_name.encode()).hexdigest()[:8]}"
 
         project = ProjectContext(
             project_id=project_id,
             project_name=project_name,
-            project_path=project_path,
+            project_path=normalized_path,
             created_at=time.time(),
             last_accessed=time.time(),
-            current_directory=project_path,
+            current_directory=normalized_path,
             full_context=[],  # Complete history from start to finish
             actual_context=[],  # Current working context
             context_summary="",  # Will be populated when actual_context gets summarized
@@ -337,7 +356,7 @@ class ContextManager:
         self._save_projects()
         self._save_context()
 
-        self.logger.success(f"Created project '{project_name}' at {project_path}")
+        self.logger.success(f"Created new project '{project_name}' at {project_path}")
         return project_id
 
     def set_active_project(self, project_id: str) -> bool:

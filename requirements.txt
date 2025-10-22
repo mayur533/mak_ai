@@ -2,10 +2,20 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
 
+# Gemini API integration
+google-genai>=1.0.0
+google-generativeai>=0.8.0
+
 # Async and performance
 aiohttp>=3.8.0
 aiofiles>=23.0.0
 asyncio-throttle>=1.0.2
+asyncio>=3.4.3
+
+# Message bus and communication
+redis>=5.0.0
+aioredis>=2.0.1
+nats-py>=2.0.0
 
 # Monitoring and metrics
 psutil>=5.9.0
@@ -17,9 +27,47 @@ pydub>=0.25.1
 gtts>=2.4.0
 pygame>=2.5.0  # Alternative audio playback
 
-# GUI automation
+# GUI automation and interaction
 pyautogui>=0.9.54
 pillow>=10.0.0
+pynput>=1.7.6
+keyboard>=0.13.5
+mouse>=0.7.1
+opencv-python>=4.8.0
+mss>=9.0.1
+
+# GUI framework
+tkinter-tooltip>=2.0.0
+ttkbootstrap>=1.10.1
+customtkinter>=5.2.0
+
+# Database and storage
+sqlite3
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+
+# JSON schema validation
+jsonschema>=4.19.0
+jsonschema-spec>=0.1.0
+
+# Token counting and text processing
+tiktoken>=0.5.0
+transformers>=4.30.0
+tokenizers>=0.13.0
+
+# Context management
+langchain>=0.1.0
+langchain-community>=0.0.10
+chromadb>=0.4.0
+
+# Task management
+celery>=5.3.0
+rq>=1.15.0
+
+# Security and encryption
+cryptography>=41.0.0
+bcrypt>=4.0.0
+pyjwt>=2.8.0
 
 # Development dependencies
 pytest>=7.4.0
@@ -31,4 +79,25 @@ mypy>=1.5.0
 
 # Additional utilities
 typing-extensions>=4.7.0
-cryptography>=41.0.0
+uuid>=1.30
+datetime
+pathlib
+uuid4>=1.0.0
+
+# Web scraping and search (using Gemini's built-in search)
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+urllib3>=2.0.0
+
+# System monitoring
+systemd-python>=235
+supervisor>=4.2.0
+
+# Container and sandboxing
+docker>=6.1.0
+firejail>=0.9.0
+
+# Background task queue
+celery>=5.3.0
+redis>=5.0.0
+rq>=1.15.0

@@ -407,3 +407,5 @@ def get_health_status() -> Dict[str, Any]:
 def get_metrics_summary() -> Dict[str, Any]:
     """Get metrics summary."""
     return metrics_collector.get_metrics_summary()
+
+

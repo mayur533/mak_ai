@@ -30,12 +30,16 @@ class BaseTools:
         self.system = system
         self.logger = logger
 
-    def run_shell(self, command: str) -> Dict[str, Any]:
+    def run_shell(self, command: str, background: bool = None, timeout: int = None) -> Dict[str, Any]:
         """
         Execute a shell command with robust error handling and validation.
+        Auto-detects GUI applications and runs them in background.
+        Intelligently sets timeout based on command type.
 
         Args:
             command: The shell command to execute
+            background: Force background execution (None=auto-detect, True=background, False=foreground)
+            timeout: Timeout in seconds (None=auto-detect based on command)
 
         Returns:
             Dict with success status and output/error
@@ -46,7 +50,78 @@ class BaseTools:
                 return {"success": False, "error": "Empty or invalid command provided"}
 
             command = command.strip()
-            self.logger.info(f"Executing shell command: `{command}`")
+            
+            # Auto-detect GUI applications and background processes
+            gui_apps = [
+                'gedit', 'kate', 'nano', 'vim', 'emacs',  # Text editors
+                'firefox', 'chrome', 'chromium', 'brave',  # Browsers
+                'code', 'subl', 'atom',  # IDEs
+                'nautilus', 'dolphin', 'thunar',  # File managers
+                'gimp', 'inkscape', 'blender',  # Graphics
+                'vlc', 'mpv', 'totem',  # Media players
+                'libreoffice', 'okular', 'evince',  # Document viewers
+            ]
+            
+            # Commands that typically take longer to execute
+            long_running_commands = [
+                'npm install', 'yarn install', 'pip install', 'apt install', 'apt-get install',
+                'yum install', 'dnf install', 'pacman -S',  # Package installations
+                'git clone', 'git pull', 'git push',  # Git operations
+                'docker build', 'docker pull', 'docker run',  # Docker operations
+                'make', 'cmake', 'gcc', 'g++', 'cargo build', 'mvn',  # Build commands
+                'wget', 'curl', 'rsync', 'scp',  # Download/transfer commands
+                'tar', 'unzip', 'gzip', 'bzip2',  # Compression commands
+                'find /', 'grep -r',  # Recursive search operations
+                'convert', 'ffmpeg', 'imagemagick',  # Media processing
+            ]
+            
+            # Commands that are typically quick
+            quick_commands = [
+                'ls', 'pwd', 'cd', 'echo', 'cat', 'mkdir', 'rm', 'cp', 'mv',
+                'touch', 'which', 'whereis', 'whoami', 'date', 'hostname',
+                'uname', 'printenv', 'env', 'export', 'alias',
+            ]
+            
+            # Check if command should run in background
+            if background is None:
+                # Auto-detect: check if command starts with a GUI app
+                cmd_parts = command.split()
+                if cmd_parts:
+                    base_cmd = cmd_parts[0].split('/')[-1]  # Get command name without path
+                    if base_cmd in gui_apps or command.endswith('&'):
+                        background = True
+                    else:
+                        background = False
+            
+            # If background execution needed, use run_shell_async (no timeout constraint)
+            if background:
+                self.logger.info(f"Executing shell command in background: `{command}`")
+                self.logger.warning(f"💡 Tip: For launching GUI applications, use 'open_application' tool instead for better control")
+                # Remove trailing & if present since we're handling it
+                command = command.rstrip('&').strip()
+                return self.run_shell_async(command, timeout=0)
+            
+            # Intelligent timeout detection if not specified
+            if timeout is None:
+                cmd_lower = command.lower()
+                
+                # Check if it's a long-running command
+                is_long_running = any(lr_cmd in cmd_lower for lr_cmd in long_running_commands)
+                
+                # Check if it's a quick command
+                is_quick = any(cmd_lower.startswith(qc) for qc in quick_commands)
+                
+                if is_long_running:
+                    timeout = 1800  # 30 minutes for long-running commands
+                    self.logger.info(f"Detected long-running command, using {timeout}s timeout")
+                elif is_quick:
+                    timeout = 30  # 30 seconds for quick commands
+                    self.logger.debug(f"Detected quick command, using {timeout}s timeout")
+                else:
+                    timeout = 300  # 5 minutes default
+                    self.logger.debug(f"Using default {timeout}s timeout")
+            
+            self.logger.info(f"Executing shell command (timeout={timeout}s): `{command}`")
 
             # Enhanced security checks
             dangerous_patterns = [
@@ -119,7 +194,7 @@ class BaseTools:
                 command,
                 shell=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
                 cwd=settings.BASE_DIR,
                 env=os.environ.copy(),  # Preserve environment
             )
@@ -131,7 +206,7 @@ class BaseTools:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
                 cwd=settings.BASE_DIR,
                 env=os.environ.copy(),
             )
@@ -175,9 +250,10 @@ class BaseTools:
             return result_dict
 
         except subprocess.TimeoutExpired as e:
-            error_msg = "Command timed out after 300 seconds"
+            error_msg = f"Command timed out after {timeout} seconds"
             self.logger.error(error_msg)
-            return {"success": False, "error": error_msg, "command": command}
+            self.logger.warning(f"💡 Tip: For long-running tasks, consider using run_shell_async() or increase timeout")
+            return {"success": False, "error": error_msg, "command": command, "timeout": timeout}
         except subprocess.CalledProcessError as e:
             error_msg = f"Command failed with CalledProcessError: {e}"
             self.logger.error(error_msg)
@@ -200,6 +276,46 @@ class BaseTools:
             self.logger.error(error_msg, exc_info=True)
             return {"success": False, "error": error_msg, "command": command}
 
+    def open_application(self, app_name: str, args: str = "") -> Dict[str, Any]:
+        """
+        Open/launch a GUI application in the background.
+        This tool is specifically for launching applications that need to stay running.
+        
+        Args:
+            app_name: Name of the application to launch (e.g., 'gedit', 'firefox', 'code')
+            args: Additional arguments to pass to the application (e.g., filename for gedit)
+            
+        Returns:
+            Dict with success status, process ID, and process info
+            
+        Examples:
+            - open_application('gedit')
+            - open_application('gedit', 'file.txt')
+            - open_application('firefox', 'https://google.com')
+            - open_application('code', '/path/to/project')
+        """
+        try:
+            # Build the command
+            command = f"{app_name} {args}".strip() if args else app_name
+            
+            self.logger.info(f"🚀 Launching application: {command}")
+            
+            # Always use run_shell_async with no timeout for GUI applications
+            result = self.run_shell_async(command, timeout=0)
+            
+            if result.get("success"):
+                self.logger.success(f"✅ Application '{app_name}' launched successfully")
+                process_id = result.get("process_id")
+                self.logger.info(f"📋 Process ID: {process_id}")
+                self.logger.info("💡 Application is running in background. Use other tools to interact with it.")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Failed to launch application '{app_name}': {str(e)}"
+            self.logger.error(error_msg)
+            return {"success": False, "error": error_msg}
+    
     def run_shell_async(self, command: str, timeout: int = 300) -> Dict[str, Any]:
         """
         Execute a shell command in a truly non-blocking separate process.
@@ -1912,7 +2028,7 @@ class BaseTools:
         except Exception as e:
             return {"success": False, "error": f"Error typing text: {e}"}
 
-    def press_key(self, key_combination: str) -> Dict[str, Any]:
+    def press_key(self, key: str) -> Dict[str, Any]:
         """Press key combination using xdotool."""
         try:
             import subprocess
@@ -1929,26 +2045,84 @@ class BaseTools:
                     ),
                 }
 
-            cmd = ["xdotool", "key", "--clearmodifiers", key_combination]
+            cmd = ["xdotool", "key", "--clearmodifiers", key]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
 
             if result.returncode == 0:
                 return {
                     "success": True,
-                    "output": f"Pressed key combination: {key_combination}",
-                    "message": f"Successfully pressed {key_combination}",
+                    "output": f"Pressed key: {key}",
+                    "message": f"Successfully pressed {key}",
                 }
             else:
                 return {
                     "success": False,
                     "error": f"xdotool key failed: {result.stderr}",
-                    "output": f"Failed to press {key_combination}",
+                    "output": f"Failed to press {key}",
                 }
 
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "Key press timed out"}
         except Exception as e:
             return {"success": False, "error": f"Error pressing key: {e}"}
+
+    def execute_gui_actions(self, actions: list) -> Dict[str, Any]:
+        """Execute a list of GUI actions (click, type, key_press)."""
+        try:
+            executed_actions = []
+            failed_actions = []
+            
+            for action in actions:
+                action_type = action.get("action", "").lower()
+                coordinates = action.get("coordinates", {})
+                x = coordinates.get("x", 0)
+                y = coordinates.get("y", 0)
+                
+                try:
+                    if action_type == "click":
+                        result = self.click_screen(x=x, y=y, button="left")
+                        if result.get("success"):
+                            executed_actions.append(f"✅ Clicked at ({x}, {y})")
+                        else:
+                            failed_actions.append(f"❌ Failed to click at ({x}, {y}): {result.get('error', 'Unknown error')}")
+                            
+                    elif action_type == "type":
+                        text = action.get("parameters", {}).get("text", "")
+                        result = self.type_text(text=text, x=x, y=y)
+                        if result.get("success"):
+                            executed_actions.append(f"✅ Typed '{text}' at ({x}, {y})")
+                        else:
+                            failed_actions.append(f"❌ Failed to type '{text}' at ({x}, {y}): {result.get('error', 'Unknown error')}")
+                            
+                    elif action_type == "key_press":
+                        key = action.get("parameters", {}).get("key", "enter")
+                        result = self.press_key(key=key)
+                        if result.get("success"):
+                            executed_actions.append(f"✅ Pressed key '{key}'")
+                        else:
+                            failed_actions.append(f"❌ Failed to press key '{key}': {result.get('error', 'Unknown error')}")
+                            
+                except Exception as e:
+                    failed_actions.append(f"❌ Error executing {action_type}: {str(e)}")
+
+            execution_summary = "\n".join(executed_actions + failed_actions)
+            
+            return {
+                "success": len(failed_actions) == 0,
+                "executed_actions": executed_actions,
+                "failed_actions": failed_actions,
+                "total_executed": len(executed_actions),
+                "total_failed": len(failed_actions),
+                "output": f"Executed {len(executed_actions)} actions successfully, {len(failed_actions)} failed\n\n{execution_summary}",
+                "message": f"GUI actions execution completed: {len(executed_actions)} successful, {len(failed_actions)} failed",
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Error executing GUI actions: {e}",
+                "output": f"GUI actions execution failed: {e}",
+            }
 
     def click_screen(self, x: int, y: int, button: str = "left") -> Dict[str, Any]:
         """Click at specific screen coordinates using xdotool with validation."""
@@ -2239,16 +2413,33 @@ class BaseTools:
         except Exception as e:
             return {"success": False, "error": f"Error getting window list: {e}"}
 
-    def focus_window(self, window_identifier: str) -> Dict[str, Any]:
-        """Focus/activate a specific window by ID, name, or class."""
+    def focus_window(self, window_identifier: str = None, window_title: str = None, window_id: str = None, window_class: str = None) -> Dict[str, Any]:
+        """
+        Focus/activate a specific window by ID, name, or class.
+        
+        Args:
+            window_identifier: General identifier (will be used if other params not provided)
+            window_title: Specific window title to search for
+            window_id: Specific window ID
+            window_class: Specific window class
+            
+        Returns:
+            Dict with success status and output
+        """
         try:
             import subprocess
+            
+            # Determine which identifier to use
+            identifier = window_id or window_title or window_class or window_identifier
+            
+            if not identifier:
+                return {"success": False, "error": "No window identifier provided"}
 
             # Try different methods to find and focus the window
             methods = [
                 # Method 1: Direct window ID
                 lambda: subprocess.run(
-                    ["xdotool", "windowactivate", window_identifier],
+                    ["xdotool", "windowactivate", identifier],
                     capture_output=True,
                     text=True,
                     timeout=3,
@@ -2259,7 +2450,7 @@ class BaseTools:
                         "xdotool",
                         "search",
                         "--name",
-                        window_identifier,
+                        identifier,
                         "windowactivate",
                     ],
                     capture_output=True,
@@ -2272,7 +2463,7 @@ class BaseTools:
                         "xdotool",
                         "search",
                         "--class",
-                        window_identifier,
+                        identifier,
                         "windowactivate",
                     ],
                     capture_output=True,
@@ -2286,7 +2477,7 @@ class BaseTools:
                         "search",
                         "--onlyvisible",
                         "--name",
-                        window_identifier,
+                        identifier,
                         "windowactivate",
                     ],
                     capture_output=True,
@@ -2917,17 +3108,62 @@ REMEMBER: Be extremely conservative. Only suggest actions for elements you can c
                             validated_actions
                         )
 
+                        # Execute the actions if they are simple and safe
+                        actions_list = validated_actions.get("actions", []) if isinstance(validated_actions, dict) else []
+                        executed_actions = []
+                        
+                        for action in actions_list:
+                            action_type = action.get("action", "").lower()
+                            coordinates = action.get("coordinates", {})
+                            x = coordinates.get("x", 0)
+                            y = coordinates.get("y", 0)
+                            
+                            try:
+                                if action_type == "click":
+                                    # Execute click
+                                    click_result = self.click_screen(x=x, y=y, button="left")
+                                    if click_result.get("success"):
+                                        executed_actions.append(f"✅ Clicked at ({x}, {y})")
+                                    else:
+                                        executed_actions.append(f"❌ Failed to click at ({x}, {y})")
+                                        
+                                elif action_type == "type":
+                                    # Execute typing
+                                    text = action.get("parameters", {}).get("text", "")
+                                    type_result = self.type_text(text=text, x=x, y=y)
+                                    if type_result.get("success"):
+                                        executed_actions.append(f"✅ Typed '{text}' at ({x}, {y})")
+                                    else:
+                                        executed_actions.append(f"❌ Failed to type '{text}' at ({x}, {y})")
+                                        
+                                elif action_type == "key_press":
+                                    # Execute key press
+                                    key = action.get("parameters", {}).get("key", "enter")
+                                    key_result = self.press_key(key=key)
+                                    if key_result.get("success"):
+                                        executed_actions.append(f"✅ Pressed key '{key}'")
+                                    else:
+                                        executed_actions.append(f"❌ Failed to press key '{key}'")
+                                        
+                            except Exception as e:
+                                executed_actions.append(f"❌ Error executing {action_type}: {str(e)}")
+
+                        execution_summary = "\n".join(executed_actions) if executed_actions else "No actions executed"
+                        enhanced_output = f"{formatted_output}\n\n🎬 EXECUTION RESULTS:\n{execution_summary}"
+
                         return {
                             "success": True,
                             "text": analysis_text,
-                            "output": formatted_output,
-                            "message": "Screen analyzed and actions generated successfully",
-                            "summary": f"Generated {len(validated_actions.get('actions', []))} validated actionable steps",
-                            "actions": validated_actions.get("actions", []),
+                            "output": enhanced_output,
+                            "message": "Screen analyzed and actions executed successfully",
+                            "summary": f"Generated {len(actions_list)} validated actionable steps and executed them",
+                            "actions": actions_list,
+                            "executed_actions": executed_actions,
+                            "execution_summary": execution_summary,
                             "raw_analysis": analysis_text,
                             "validation_notes": validated_actions.get(
                                 "validation_notes", []
-                            ),
+                            ) if isinstance(validated_actions, dict) else [],
                         }
                     else:
                         # If no JSON found, return formatted text
