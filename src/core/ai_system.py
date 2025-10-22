@@ -10,7 +10,7 @@ import re
 import time
 import hashlib
 from collections import deque
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Annotated, Sequence, TypedDict
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +18,18 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import aiohttp
 import aiofiles
+
+# Advanced AI Frameworks
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from crewai import Agent, Task, Crew, Process
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.llms.openai import OpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
+from pydantic import BaseModel, Field
 
 # Add parent directory to path for imports
 import sys
@@ -37,10 +49,60 @@ from src.api import start_health_server
 from src.tasks.task_queue import get_task_queue, shutdown_task_queue, TaskPriority
 
 
-class AISystem:
+# Autonomous System State Management
+class AutonomousState(TypedDict):
+    """State for the autonomous AI system using LangGraph pattern."""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    current_task: Optional[str]
+    task_history: List[Dict[str, Any]]
+    error_count: int
+    success_count: int
+    learning_data: Dict[str, Any]
+    self_healing_active: bool
+    agent_rotation_count: int
+
+
+# Self-Healing and Learning Components
+class SelfHealingSystem:
+    """Handles automatic error recovery and learning."""
+    
+    def __init__(self):
+        self.error_patterns = {}
+        self.success_patterns = {}
+        self.recovery_strategies = {}
+        self.learning_threshold = 3
+        
+    def analyze_error(self, error: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze error patterns and suggest recovery strategies."""
+        error_signature = hashlib.md5(error.encode()).hexdigest()[:8]
+        
+        if error_signature not in self.error_patterns:
+            self.error_patterns[error_signature] = {
+                'count': 0,
+                'contexts': [],
+                'recovery_attempts': []
+            }
+        
+        self.error_patterns[error_signature]['count'] += 1
+        self.error_patterns[error_signature]['contexts'].append(context)
+        
+        return {
+            'error_signature': error_signature,
+            'frequency': self.error_patterns[error_signature]['count'],
+            'suggested_recovery': self._suggest_recovery(error_signature, context)
+        }
+    
+    def _suggest_recovery(self, error_signature: str, context: Dict[str, Any]) -> str:
+        """Suggest recovery strategy based on error patterns."""
+        if self.error_patterns[error_signature]['count'] > self.learning_threshold:
+            return "Use alternative approach - this method has failed multiple times"
+        return "Retry with exponential backoff"
+
+
+class AutonomousAISystem:
     """
-    Core AI system that orchestrates all functionality.
-    Handles AI interactions, tool management, and task execution.
+    Autonomous AI System with self-healing, learning, and multi-agent capabilities.
+    Uses LangGraph for ReAct pattern, CrewAI for multi-agent collaboration, and LlamaIndex for intelligent processing.
     """
 
     def __init__(self, voice_mode: bool = None, max_workers: int = 4):
@@ -73,17 +135,19 @@ class AISystem:
         self.task_queue = get_task_queue(num_workers=4)
         self.logger.info("Background task queue initialized")
 
-        # System context - completely dynamic
+        # Autonomous system context - completely dynamic and learning
         self.context = {
-            "cwd": os.getcwd(),  # Start from actual current working directory
+            "cwd": os.getcwd(),
             "os": sys.platform,
             "python_version": sys.version,
             "system_info": {},
-            "initial_goal": None,
-            "pending_goal": None,
-            "api_key_in_use": "primary",
-            "execution_history": deque(maxlen=20),
-            "conversation_history": deque(maxlen=20),
+            "learning_mode": True,
+            "self_healing_enabled": True,
+            "agent_rotation_enabled": True,
+            "execution_history": deque(maxlen=50),  # Increased for better learning
+            "conversation_history": deque(maxlen=50),
+            "error_patterns": {},
+            "success_patterns": {},
         }
 
         self.active = True
@@ -105,6 +169,335 @@ class AISystem:
         self._refresh_tools_from_database()
         
         self._get_initial_system_details()
+
+    def _setup_llamaindex(self):
+        """Initialize LlamaIndex for intelligent document processing."""
+        try:
+            # Configure LlamaIndex settings
+            Settings.llm = OpenAI(model="gpt-3.5-turbo", temperature=0.1)
+            Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+            
+            # Create knowledge base directory if it doesn't exist
+            kb_dir = Path("knowledge_base")
+            kb_dir.mkdir(exist_ok=True)
+            
+            # Initialize vector store index
+            self.vector_index = VectorStoreIndex.from_documents([])
+            self.logger.info("LlamaIndex initialized for document processing")
+            
+        except Exception as e:
+            self.logger.warning(f"LlamaIndex setup failed: {e}. Continuing without document processing.")
+
+    def _create_dynamic_agents(self):
+        """Create dynamic CrewAI agents based on task requirements."""
+        try:
+            # Base agent template
+            base_agent_config = {
+                "llm": self.llm,
+                "verbose": True,
+                "allow_delegation": True,
+                "max_iter": 3,
+            }
+            
+            # Create specialized agents dynamically
+            self.crew_agents = {
+                "coordinator": Agent(
+                    role="Task Coordinator",
+                    goal="Analyze tasks and coordinate execution",
+                    backstory="Expert at breaking down complex tasks and coordinating multiple agents",
+                    **base_agent_config
+                ),
+                "executor": Agent(
+                    role="Task Executor", 
+                    goal="Execute specific tasks and operations",
+                    backstory="Specialized in executing various system operations and tool usage",
+                    **base_agent_config
+                ),
+                "analyzer": Agent(
+                    role="Data Analyzer",
+                    goal="Analyze data, documents, and results",
+                    backstory="Expert at processing and analyzing various types of data",
+                    **base_agent_config
+                ),
+                "debugger": Agent(
+                    role="Error Debugger",
+                    goal="Identify and fix errors automatically",
+                    backstory="Specialized in error analysis and automatic problem resolution",
+                    **base_agent_config
+                )
+            }
+            
+            self.logger.info("Dynamic CrewAI agents created successfully")
+            
+        except Exception as e:
+            self.logger.warning(f"CrewAI agent creation failed: {e}. Using fallback mode.")
+
+    def _create_react_workflow(self):
+        """Create LangGraph ReAct workflow for autonomous operation."""
+        try:
+            # Define the workflow
+            workflow = StateGraph(AutonomousState)
+            
+            # Add nodes
+            workflow.add_node("agent", self._call_agent)
+            workflow.add_node("tools", self._call_tools)
+            
+            # Set entry point
+            workflow.set_entry_point("agent")
+            
+            # Add conditional edges
+            workflow.add_conditional_edges(
+                "agent",
+                self._should_continue,
+                {
+                    "continue": "tools",
+                    "end": END,
+                }
+            )
+            
+            # Add edge back to agent
+            workflow.add_edge("tools", "agent")
+            
+            # Compile workflow
+            return workflow.compile()
+            
+        except Exception as e:
+            self.logger.warning(f"LangGraph workflow creation failed: {e}. Using fallback mode.")
+            return None
+
+    def _call_agent(self, state: AutonomousState):
+        """Call the AI agent with current state."""
+        try:
+            # Get the latest message
+            messages = state["messages"]
+            if not messages:
+                return {"messages": [AIMessage(content="Hello! How can I help you today?")]}
+            
+            # Use the LLM to generate response
+            response = self.llm.invoke(messages)
+            return {"messages": [response]}
+            
+        except Exception as e:
+            self.logger.error(f"Agent call failed: {e}")
+            return {"messages": [AIMessage(content=f"I encountered an error: {e}")]}
+
+    def _call_tools(self, state: AutonomousState):
+        """Execute tools based on agent's tool calls."""
+        try:
+            messages = state["messages"]
+            last_message = messages[-1]
+            
+            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                tool_outputs = []
+                for tool_call in last_message.tool_calls:
+                    # Execute the tool
+                    result = self._execute_tool_call(tool_call)
+                    tool_outputs.append(
+                        ToolMessage(
+                            content=str(result),
+                            name=tool_call["name"],
+                            tool_call_id=tool_call["id"]
+                        )
+                    )
+                return {"messages": tool_outputs}
+            
+            return {"messages": []}
+            
+        except Exception as e:
+            self.logger.error(f"Tool execution failed: {e}")
+            return {"messages": [ToolMessage(content=f"Tool execution error: {e}", name="error")]}
+
+    def _should_continue(self, state: AutonomousState):
+        """Determine whether to continue with tools or end."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        
+        # If the last message has tool calls, continue to tools
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            return "continue"
+        
+        # Otherwise, end the conversation
+        return "end"
+
+    def _execute_tool_call(self, tool_call: Dict[str, Any]) -> Any:
+        """Execute a specific tool call."""
+        try:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            
+            # Find the tool in our tool manager
+            if tool_name in self.tool_manager.tools:
+                tool = self.tool_manager.tools[tool_name]
+                return tool.func(**tool_args)
+            else:
+                return f"Tool '{tool_name}' not found"
+                
+        except Exception as e:
+            return f"Error executing tool: {e}"
+
+    def process_request_autonomous(self, user_input: str) -> Dict[str, Any]:
+        """Process requests using autonomous ReAct pattern with self-healing."""
+        start_time = time.time()
+        
+        try:
+            # Initialize autonomous state
+            initial_state = AutonomousState(
+                messages=[HumanMessage(content=user_input)],
+                current_task=user_input,
+                task_history=[],
+                error_count=0,
+                success_count=0,
+                learning_data={},
+                self_healing_active=True,
+                agent_rotation_count=0
+            )
+            
+            # Use LangGraph workflow if available
+            if self.workflow:
+                result = self.workflow.invoke(initial_state)
+                
+                # Extract final response
+                final_messages = result.get("messages", [])
+                if final_messages:
+                    last_message = final_messages[-1]
+                    if hasattr(last_message, 'content'):
+                        response_content = last_message.content
+                    else:
+                        response_content = str(last_message)
+                else:
+                    response_content = "Task completed successfully"
+                
+                duration = time.time() - start_time
+                
+                # Learn from this interaction
+                self._learn_from_interaction(user_input, response_content, True, duration)
+                
+                return {
+                    "success": True,
+                    "result": response_content,
+                    "duration": duration,
+                    "method": "autonomous_react"
+                }
+            else:
+                # Fallback to traditional processing
+                return self._fallback_processing(user_input, start_time)
+                
+        except Exception as e:
+            # Self-healing: analyze error and attempt recovery
+            error_analysis = self.self_healing.analyze_error(str(e), {"input": user_input})
+            
+            self.logger.error(f"Autonomous processing failed: {e}")
+            self.logger.info(f"Error analysis: {error_analysis}")
+            
+            # Attempt recovery
+            if error_analysis['frequency'] < 3:
+                return self._attempt_recovery(user_input, str(e), start_time)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Persistent error after multiple attempts: {e}",
+                    "error_analysis": error_analysis
+                }
+
+    def _fallback_processing(self, user_input: str, start_time: float) -> Dict[str, Any]:
+        """Fallback processing when autonomous systems fail."""
+        try:
+            # Use traditional processing
+            success = self.process_request(user_input)
+            duration = time.time() - start_time
+            
+            return {
+                "success": success,
+                "result": "Task completed using fallback method",
+                "duration": duration,
+                "method": "fallback"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Fallback processing failed: {e}",
+                "method": "fallback"
+            }
+
+    def _attempt_recovery(self, user_input: str, error: str, start_time: float) -> Dict[str, Any]:
+        """Attempt to recover from errors using different strategies."""
+        try:
+            # Try using CrewAI agents for recovery
+            if self.crew_agents:
+                recovery_task = Task(
+                    description=f"Recover from error: {error}. Original request: {user_input}",
+                    agent=self.crew_agents["debugger"],
+                    expected_output="Successful recovery or alternative solution"
+                )
+                
+                crew = Crew(
+                    agents=[self.crew_agents["debugger"]],
+                    tasks=[recovery_task],
+                    process=Process.sequential,
+                    verbose=True
+                )
+                
+                result = crew.kickoff()
+                duration = time.time() - start_time
+                
+                return {
+                    "success": True,
+                    "result": str(result),
+                    "duration": duration,
+                    "method": "recovery_crewai"
+                }
+            else:
+                # Simple retry with exponential backoff
+                time.sleep(1)
+                return self._fallback_processing(user_input, start_time)
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Recovery attempt failed: {e}",
+                "method": "recovery_failed"
+            }
+
+    def _learn_from_interaction(self, input_text: str, output_text: str, success: bool, duration: float):
+        """Learn from interactions to improve future performance."""
+        try:
+            interaction_data = {
+                "input": input_text,
+                "output": output_text,
+                "success": success,
+                "duration": duration,
+                "timestamp": time.time()
+            }
+            
+            if success:
+                # Store successful patterns
+                pattern_key = hashlib.md5(input_text.encode()).hexdigest()[:8]
+                if pattern_key not in self.context["success_patterns"]:
+                    self.context["success_patterns"][pattern_key] = []
+                
+                self.context["success_patterns"][pattern_key].append(interaction_data)
+                
+                # Keep only recent successful patterns
+                if len(self.context["success_patterns"][pattern_key]) > 10:
+                    self.context["success_patterns"][pattern_key] = \
+                        self.context["success_patterns"][pattern_key][-10:]
+            else:
+                # Store error patterns for analysis
+                error_key = hashlib.md5(input_text.encode()).hexdigest()[:8]
+                if error_key not in self.context["error_patterns"]:
+                    self.context["error_patterns"][error_key] = []
+                
+                self.context["error_patterns"][error_key].append(interaction_data)
+                
+                # Keep only recent error patterns
+                if len(self.context["error_patterns"][error_key]) > 5:
+                    self.context["error_patterns"][error_key] = \
+                        self.context["error_patterns"][error_key][-5:]
+            
+            self.logger.debug(f"Learned from interaction: success={success}, duration={duration:.2f}s")
+            
+        except Exception as e:
+            self.logger.warning(f"Learning from interaction failed: {e}")
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -1568,97 +1961,22 @@ Current Request:
         )
 
         prompt_template = f"""
-You are a **Multi-Agent AI System** consisting of specialized agents working together to complete user requests. Each agent has specific expertise and responsibilities, but they collaborate seamlessly to achieve complex tasks.
+You are an **Autonomous AI System** with self-healing capabilities and intelligent learning.
 
-## 🤖 **AGENT TEAM STRUCTURE:**
-
-### **1. 🧠 COORDINATOR AGENT (Primary)**
-- **Role**: Task analysis, planning, and coordination
-- **Responsibilities**: 
-  - Analyze user requests and break them down
-  - Create comprehensive step-by-step plans
-  - Coordinate between specialized agents
-  - Monitor overall progress and quality
-  - Make final decisions on task completion
-
-### **2. 🔍 EXPLORER AGENT**
-- **Role**: System discovery and navigation
-- **Responsibilities**:
-  - Explore file systems and directories dynamically
-  - Discover available resources and tools
-  - Navigate to required locations
-  - Find files, directories, and system components
-  - Map out system structure and capabilities
-
-### **3. 🛠️ EXECUTOR AGENT**
-- **Role**: Tool execution and command running
-- **Responsibilities**:
-  - Execute shell commands and system operations
-  - Run file operations (read, write, create, delete)
-  - Install packages and dependencies
-  - Execute GUI automation tasks
-  - Handle system-level operations
-
-### **4. 🎯 GUI AGENT**
-- **Role**: Visual interface interaction
-- **Responsibilities**:
-  - Capture and analyze screenshots
-  - Perform mouse and keyboard operations
-  - Interact with applications and windows
-  - Navigate web interfaces and desktop applications
-  - Handle visual element detection and interaction
-
-### **5. 🔧 DEBUGGER AGENT**
-- **Role**: Error resolution and system healing
-- **Responsibilities**:
-  - Analyze errors and failures
-  - Diagnose system issues
-  - Implement fixes and workarounds
-  - Prevent repetitive failures
-  - Optimize system performance
-
-### **6. 📊 ANALYZER AGENT**
-- **Role**: Data analysis and content processing
-- **Responsibilities**:
-  - Analyze images, documents, and data
-  - Process search results and web content
-  - Extract meaningful information
-  - Generate insights and summaries
-  - Handle complex data transformations
-
-## 🔄 **COLLABORATIVE WORKFLOW:**
-
-1. **COORDINATOR** receives user request and analyzes requirements
-2. **EXPLORER** discovers available resources and system state
-3. **COORDINATOR** creates detailed plan with specific agent assignments
-4. **EXECUTOR** handles file operations and system commands
-5. **GUI AGENT** manages visual interactions when needed
-6. **ANALYZER** processes data and content as required
-7. **DEBUGGER** resolves any errors that occur
-8. **COORDINATOR** monitors progress and adjusts plan as needed
-9. **COORDINATOR** confirms task completion and quality
-
-## 🎯 **AGENT COORDINATION RULES:**
-
-- **Dynamic Assignment**: Each agent can take the lead based on task requirements
-- **Seamless Handoff**: Agents pass context and results to each other efficiently
-- **Error Escalation**: When one agent fails, others step in to help
-- **Quality Assurance**: Multiple agents verify results before completion
-- **Adaptive Planning**: Plans adjust based on agent discoveries and capabilities
-
-## 🛠️ **DYNAMIC AGENT TOOL ASSIGNMENTS:**
-
-{self._generate_agent_tool_assignments()}
+## 🧠 **AUTONOMOUS CAPABILITIES:**
+- **Self-Healing**: Automatically detects and recovers from errors
+- **Learning**: Improves performance based on past interactions
+- **Adaptive**: Dynamically adjusts strategies based on context
+- **Multi-Modal**: Uses ReAct pattern for reasoning and acting
+- **Tool Integration**: Seamlessly uses available tools as needed
 
 ## 🎯 **CORE PRINCIPLES:**
 - **DYNAMIC**: Never hardcode paths - always explore and discover what exists
 - **ADAPTIVE**: Work with whatever you find, don't assume anything exists
-- **COLLABORATIVE**: Agents work together seamlessly and rotate to prevent loops
-- **EFFICIENT**: Use the right agent for the right task, but switch agents when stuck
-- **SELF-HEALING**: Debugger agent resolves issues automatically
-- **QUALITY-FOCUSED**: Multiple agents verify results
-- **ANTI-LOOP**: If an agent fails repeatedly, switch to an alternative agent
-- **TOOL-AGNOSTIC**: Use any available tool from any agent as needed
+- **SELF-HEALING**: Automatically resolve issues and learn from failures
+- **EFFICIENT**: Use the most appropriate approach for each task
+- **LEARNING**: Continuously improve based on experience
+- **TOOL-AGNOSTIC**: Use any available tool as needed
 
 **File and Directory Creation Rules:**
 {self._get_system_rules()}
@@ -2756,37 +3074,80 @@ Always return a valid JSON object.
             return False
 
     def run(self):
-        """Main run loop for the AI system."""
-        if self.voice_mode:
-            self.voice_tools.speak(
-                "Hello, I am a self-improving AI system. How can I help you today?"
-            )
-        else:
-            self.logger.info("AI System ready. Type your request or 'exit' to quit.")
-
-        while self.active:
+        """Run the autonomous AI system."""
+        try:
+            self.logger.info("Autonomous AI System started")
             if self.voice_mode:
-                listen_result = self.voice_tools.listen()
-                if not listen_result["success"]:
-                    self.logger.error(f"Voice input failed: {listen_result['error']}")
-                    user_input = input("\n> ")
-                else:
-                    user_input = listen_result["output"]
+                self.voice_tools.speak(
+                    "Hello, I am an autonomous AI system with self-healing capabilities. How can I help you today?"
+                )
             else:
-                user_input = input("\n> ")
+                print("🤖 Autonomous AI System Started")
+                print("Type 'exit', 'quit', or 'stop' to end the session")
+                print("=" * 50)
 
-            if not user_input:
-                continue
+            while self.active:
+                try:
+                    if self.voice_mode:
+                        listen_result = self.voice_tools.listen()
+                        if not listen_result["success"]:
+                            self.logger.error(f"Voice input failed: {listen_result['error']}")
+                            user_input = input("\n> ")
+                        else:
+                            user_input = listen_result["output"]
+                    else:
+                        user_input = input("\n> ").strip()
 
-            if user_input.lower() in ["exit", "quit", "goodbye"]:
-                if self.voice_mode:
-                    self.voice_tools.speak("Goodbye!")
-                else:
-                    self.logger.info("Goodbye!")
-                self.active = False
-                continue
+                    if not user_input:
+                        continue
 
-            self.process_request(user_input)
+                    if user_input.lower() in ["exit", "quit", "stop", "goodbye"]:
+                        if self.voice_mode:
+                            self.voice_tools.speak("Goodbye!")
+                        else:
+                            print("👋 Goodbye!")
+                        self.active = False
+                        continue
+
+                    # Process the request using autonomous system
+                    result = self.process_request_autonomous(user_input)
+                    
+                    if result["success"]:
+                        response_text = f"Task completed successfully using {result.get('method', 'unknown')} method"
+                        if "duration" in result:
+                            response_text += f" in {result['duration']:.2f} seconds"
+                        
+                        if self.voice_mode:
+                            self.voice_tools.speak(response_text)
+                        else:
+                            print(f"✅ {response_text}")
+                    else:
+                        error_text = f"Task failed: {result.get('error', 'Unknown error')}"
+                        if self.voice_mode:
+                            self.voice_tools.speak(error_text)
+                        else:
+                            print(f"❌ {error_text}")
+                            if "error_analysis" in result:
+                                print(f"🔍 Error analysis: {result['error_analysis']}")
+
+                except KeyboardInterrupt:
+                    if self.voice_mode:
+                        self.voice_tools.speak("Goodbye!")
+                    else:
+                        print("\n👋 Goodbye!")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error in main loop: {e}")
+                    error_text = f"Error: {e}"
+                    if self.voice_mode:
+                        self.voice_tools.speak(error_text)
+                    else:
+                        print(f"❌ {error_text}")
+
+        except Exception as e:
+            self.logger.error(f"Critical error in system: {e}")
+        finally:
+            self.shutdown()
 
     def shutdown(self):
         """Shutdown the AI system and clean up resources."""
@@ -3418,13 +3779,13 @@ Always return a valid JSON object.
         return False
 
 
-# Convenience function for running async system
-async def run_async_ai_system():
-    """Run the async AI system."""
-    async_system = AISystem()
-    await async_system.run_async()
+# Convenience function for running autonomous system
+async def run_autonomous_ai_system():
+    """Run the autonomous AI system."""
+    autonomous_system = AutonomousAISystem()
+    await autonomous_system.run_async()
 
 
 if __name__ == "__main__":
-    # Run async system by default
-    asyncio.run(run_async_ai_system())
+    # Run autonomous system by default
+    asyncio.run(run_autonomous_ai_system())

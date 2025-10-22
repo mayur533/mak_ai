@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).parent / "src"))
 
 from src.config.settings import settings
 from src.logging.logger import logger
-from src.core.ai_system import AISystem
+from src.core.ai_system import AutonomousAISystem
 
 
 def main():
@@ -77,8 +77,8 @@ Examples:
     logger.info(f"API key: {'Primary' if settings.GEMINI_API_KEY else 'Secondary'}")
 
     try:
-        # Initialize and run the AI system
-        ai_system = AISystem(voice_mode=args.voice)
+        # Initialize and run the autonomous AI system
+        ai_system = AutonomousAISystem(voice_mode=args.voice)
         ai_system.run()
 
     except KeyboardInterrupt:

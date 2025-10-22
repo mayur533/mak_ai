@@ -23,22 +23,15 @@ from src.logging.logger import logger
 
 
 @dataclass
-class ProjectContext:
-    """Represents a project context with all relevant information."""
+class SessionContext:
+    """Represents a session context for autonomous operation."""
 
-    project_id: str
-    project_name: str
-    project_path: str
+    session_id: str
     created_at: float
     last_accessed: float
     current_directory: str
-    full_context: List[
-        Dict[str, Any]
-    ]  # Complete history from start to finish (never summarized)
-    actual_context: List[
-        Dict[str, Any]
-    ]  # Current working context (gets summarized when full)
-    context_summary: str  # Summarized version of actual_context when it gets full
+    context_entries: List[Dict[str, Any]]  # Current working context
+    context_summary: str  # Summarized version when context gets full
     context_hash: str
     is_active: bool = True
 
