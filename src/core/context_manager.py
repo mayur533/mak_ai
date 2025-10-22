@@ -362,10 +362,69 @@ class AdvancedContextManager:
                     
                     if session.is_active:
                         self.current_session = session
+                    
+                    # Load context entries for this session
+                    self._load_context_entries_for_session(session)
                         
             self.logger.info(f"Loaded {len(self.sessions)} sessions")
         except Exception as e:
             self.logger.error(f"Failed to load sessions: {e}")
+
+    def _load_context_entries_for_session(self, session: SessionContext):
+        """Load context entries for a specific session from database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT entry_id, timestamp, context_type, priority, relevance, content, 
+                           metadata, tags, source, duration, success, tokens_used, memory_impact,
+                           related_entries, compressed, version, semantic_hash, context_window_position,
+                           attention_weight, decay_factor, last_accessed, access_count
+                    FROM context_entries 
+                    WHERE session_id = ?
+                    ORDER BY timestamp
+                """, (session.session_id,))
+                
+                for row in cursor.fetchall():
+                    # Parse enums
+                    context_type = ContextType(row[2])
+                    priority = Priority(row[3])
+                    relevance = ContextRelevance(row[4])
+                    
+                    # Parse metadata and tags
+                    metadata = json.loads(row[6]) if row[6] else {}
+                    tags = set(json.loads(row[7])) if row[7] else set()
+                    related_entries = json.loads(row[13]) if row[13] else []
+                    
+                    # Create context entry
+                    entry = ContextEntry(
+                        entry_id=row[0],
+                        context_type=context_type,
+                        content=row[5],
+                        priority=priority,
+                        relevance=relevance,
+                        timestamp=row[1],
+                        metadata=metadata,
+                        tags=tags,
+                        source=row[8],
+                        duration=row[9],
+                        success=bool(row[10]),
+                        tokens_used=row[11],
+                        memory_impact=row[12],
+                        related_entries=related_entries,
+                        compressed=bool(row[14]),
+                        version=row[15],
+                        semantic_hash=row[16],
+                        context_window_position=row[17],
+                        attention_weight=row[18],
+                        decay_factor=row[19],
+                        last_accessed=row[20],
+                        access_count=row[21]
+                    )
+                    
+                    session.context_entries.append(entry)
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to load context entries for session {session.session_id}: {e}")
 
     def _load_memory_notes(self):
         """Load memory notes from database."""
