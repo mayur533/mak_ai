@@ -37,7 +37,7 @@ class Logger:
         "BOLD_CYAN": "\033[1;96m",
     }
 
-    def __init__(self, name: str = "ai_assistant", log_dir: Optional[Path] = None):
+    def __init__(self, name: str = "ai_assistant", log_dir: Optional[Path] = None, clean_console: bool = True):
         """Initialize logger with optional custom log directory."""
         self.name = name
         self.log_dir = log_dir or settings.LOG_DIR
@@ -46,6 +46,7 @@ class Logger:
         )
         self.verbose = settings.VERBOSE_LOGGING
         self.debug_mode = settings.DEBUG_MODE
+        self.clean_console = clean_console  # New parameter to control console output
 
         # Ensure log directory exists
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -83,14 +84,18 @@ class Logger:
 
     def info(self, msg: str):
         """Log info message."""
-        log_msg = self._format_message("INFO", msg, self.COLORS["BLUE"])
-        print(log_msg)
+        # Only show critical info messages in clean console mode
+        if not self.clean_console or any(keyword in msg.lower() for keyword in ["autonomous ai system started", "shutdown complete"]):
+            log_msg = self._format_message("INFO", msg, self.COLORS["BLUE"])
+            print(log_msg)
         self._write_to_file(f"[INFO] {msg}")
 
     def success(self, msg: str):
         """Log success message."""
-        log_msg = self._format_message("SUCCESS", msg, self.COLORS["GREEN"])
-        print(log_msg)
+        # Only show critical success messages in clean console mode
+        if not self.clean_console or any(keyword in msg.lower() for keyword in ["task completed successfully", "ai system shutdown complete"]):
+            log_msg = self._format_message("SUCCESS", msg, self.COLORS["GREEN"])
+            print(log_msg)
         self._write_to_file(f"[SUCCESS] {msg}")
 
     def error(self, msg: str, exc_info: bool = False):
@@ -106,8 +111,8 @@ class Logger:
         self._write_to_file(f"[WARNING] {msg}")
 
     def debug(self, msg: str):
-        """Log debug message (only if debug mode is enabled)."""
-        if self.debug_mode or self.verbose:
+        """Log debug message (only if debug mode is enabled and clean_console is False)."""
+        if (self.debug_mode or self.verbose) and not self.clean_console:
             log_msg = self._format_message("DEBUG", msg, self.COLORS["MAGENTA"])
             print(log_msg)
         self._write_to_file(f"[DEBUG] {msg}")
@@ -118,7 +123,7 @@ class Logger:
         formatted_msg = self._format_message(
             "STEP", log_msg, self.COLORS["BOLD_YELLOW"]
         )
-        print(f"\n{formatted_msg}")
+        # Only log to file, not console
         self._write_to_file(f"[STEP {step_num}/{total}] {desc}")
 
     def critical(self, msg: str):

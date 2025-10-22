@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 from src.config.settings import settings
-from src.logging.logger import logger
+from src.logging.logger import Logger
 from src.database.memory import MemoryManager, ToolManager, ExecutionHistory, Tool
 from src.tools.base_tools import BaseTools
 from src.tools.voice_tools import VoiceTools
@@ -114,7 +114,7 @@ class AutonomousAISystem:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.session = None
         self.semaphore = asyncio.Semaphore(max_workers)
-        self.logger = logger
+        self.logger = Logger("ai_system", clean_console=True)
 
         # Initialize components
         self.memory_manager = MemoryManager()
@@ -2335,7 +2335,6 @@ Always return a valid JSON object.
             metrics_collector.increment_counter("requests_started")
 
             self.logger.debug(f"Processing Request: {user_input}")
-            print(f"\n🔄 Processing: {user_input}")
 
             max_retries = 5  # Limit retries to prevent infinite loops
             retry_count = 0
@@ -2847,6 +2846,12 @@ Always return a valid JSON object.
                 return True
 
             self.logger.step(1, 1, comment)
+            # Log step to execution history for clean display
+            self.context["execution_history"].append({
+                "action": action,
+                "comment": comment,
+                "timestamp": time.time()
+            })
 
             # Store plan in context
             self.context["last_plan"] = {
@@ -3085,50 +3090,19 @@ Always return a valid JSON object.
                     return True
 
             if output_text == "TASK_COMPLETED_SIGNAL":
-                print(f"\n{'🎉'*20}")
-                print(f"🎉 TASK COMPLETED SUCCESSFULLY! 🎉")
-                print(f"{'🎉'*20}\n")
                 self.logger.success("Task completed successfully!")
                 self.context["status"] = "Task completed successfully."
                 return True
 
             if result.get("success"):
-                # Display structured output without duplicating the full result
-                print(f"\n{'='*60}")
-                print(f"✅ STEP COMPLETED: {comment}")
-                print(f"{'='*60}")
-                print(f"📋 Tool: {action}")
-
-                # Use summary if available, otherwise show truncated output
-                summary = result.get("summary", "")
-                if summary:
-                    print(f"📊 Result: {summary}")
-                elif action == "read_screen":
-                    print(
-                        f"📊 Result: Screen analyzed successfully - see logs for full details"
-                    )
-                elif action in ["get_all_windows", "get_active_window", "focus_window"]:
-                    # For window tools, show full output as it's essential for debugging
-                    print(f"📊 Result: {output_text}")
-                elif action in ["enhanced_web_search", "google_search", "google_search_news"]:
-                    # For search tools, show full output as it contains important information
-                    print(f"📊 Result: {output_text}")
-                elif action in ["read_file", "read_json_file", "read_csv_file"]:
-                    # For file reading tools, show full output as it contains the file content
-                    print(f"📊 Result: {output_text}")
-                else:
-                    # For other tools, show truncated output
-                    truncated_output = (
-                        output_text[:200] + "..."
-                        if len(output_text) > 200
-                        else output_text
-                    )
-                    print(f"📊 Result: {truncated_output}")
-
-                print(f"{'='*60}\n")
+                # Log success to execution history for clean display
+                self.logger.success(f"Tool '{action}' completed successfully")
+                
+                # Log the result for debugging and context
+                self.logger.debug(f"Tool '{action}' result: {output_text[:200]}...")
 
                 # Log the full output for debugging and context
-                self.logger.success(f"Step completed. Full output:\n{output_text}")
+                self.logger.debug(f"Step completed. Full output:\n{output_text}")
                 self.memory_manager.remember(
                     f"Executed '{action}' successfully. Output: {output_text}",
                     {"type": "tool_output", "tool": action},
@@ -3202,7 +3176,7 @@ Always return a valid JSON object.
             return False
 
     def run(self):
-        """Run the autonomous AI system."""
+        """Run the autonomous AI system with clean console output."""
         try:
             self.logger.info("Autonomous AI System started")
             if self.voice_mode:
@@ -3237,43 +3211,132 @@ Always return a valid JSON object.
                         self.active = False
                         continue
 
+                    # Show user input
+                    print(f"\nYou: {user_input}")
+                    
                     # Process the request using full AI system with enhanced prompt
                     self.process_request(user_input)
                     
-                    # The process_request method handles the full AI processing
-                    # and updates the context with results
-                    if self.context.get("status", "").startswith("Task completed"):
-                        response_text = self.context.get("status", "Task completed successfully")
-                        
-                        if self.voice_mode:
-                            self.voice_tools.speak(response_text)
-                        else:
-                            print(f"✅ {response_text}")
-                    else:
-                        error_text = self.context.get("status", "Task completed successfully")
-                        if self.voice_mode:
-                            self.voice_tools.speak(error_text)
-                        else:
-                            print(f"❌ {error_text}")
-
+                    # Show clean response
+                    self._display_clean_response()
+                    
                 except KeyboardInterrupt:
                     if self.voice_mode:
                         self.voice_tools.speak("Goodbye!")
                     else:
                         print("\n👋 Goodbye!")
+                    self.active = False
                     break
                 except Exception as e:
                     self.logger.error(f"Error in main loop: {e}")
-                    error_text = f"Error: {e}"
-                    if self.voice_mode:
-                        self.voice_tools.speak(error_text)
-                    else:
-                        print(f"❌ {error_text}")
-
+                    if not self.voice_mode:
+                        print(f"❌ Error: {e}")
+                        
+        except KeyboardInterrupt:
+            if self.voice_mode:
+                self.voice_tools.speak("Goodbye!")
+            else:
+                print("\n👋 Goodbye!")
+            self.active = False
         except Exception as e:
-            self.logger.error(f"Critical error in system: {e}")
+            self.logger.error(f"Unexpected error in main loop: {e}")
+            if not self.voice_mode:
+                print(f"❌ Error: {e}")
         finally:
             self.shutdown()
+
+    def _display_clean_response(self):
+        """Display clean response without implementation details."""
+        try:
+            # Get the AI response from context
+            ai_response = ""
+            steps_performed = []
+            
+            # Extract AI response from conversation history
+            if self.context.get("conversation_history"):
+                last_conv = self.context["conversation_history"][-1]
+                ai_response = last_conv.get("ai", "")
+            
+            # Extract steps from execution history
+            if self.context.get("execution_history"):
+                for entry in self.context["execution_history"]:
+                    if entry.get("action") and entry.get("comment"):
+                        steps_performed.append(entry["comment"])
+            
+            # Parse AI response to extract natural message
+            natural_message = self._extract_natural_message(ai_response)
+            
+            # Display clean response
+            if natural_message:
+                print(f"\nAI: {natural_message}")
+            
+            # Show steps if any were performed (only if they're meaningful)
+            meaningful_steps = [step for step in steps_performed if not step.startswith("The user said")]
+            if meaningful_steps:
+                print("\nSteps performed:")
+                for i, step in enumerate(meaningful_steps, 1):
+                    print(f"  {i}. {step}")
+            
+            # Show final status only if it's meaningful
+            status = self.context.get("status", "")
+            if status and not status.startswith("Initial user request") and "Task completed successfully" not in status:
+                if "failed" in status.lower() or "error" in status.lower():
+                    print(f"\n❌ {status}")
+                elif status != "Task completed successfully.":
+                    print(f"\n📋 {status}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error displaying clean response: {e}")
+            print(f"\n❌ Error displaying response: {e}")
+
+    def _extract_natural_message(self, ai_response: str) -> str:
+        """Extract natural message from AI response, handling JSON format."""
+        try:
+            if not ai_response:
+                return ""
+            
+            # Try to parse as JSON first
+            if ai_response.strip().startswith('```json'):
+                # Extract JSON from markdown
+                json_start = ai_response.find('{')
+                json_end = ai_response.rfind('}') + 1
+                if json_start != -1 and json_end > json_start:
+                    json_str = ai_response[json_start:json_end]
+                    try:
+                        response_data = json.loads(json_str)
+                        plan = response_data.get("plan", [])
+                        if plan and len(plan) > 0:
+                            # Extract the message from the first step
+                            first_step = plan[0]
+                            args = first_step.get("args", {})
+                            message = args.get("message", "")
+                            if message:
+                                return message
+                    except json.JSONDecodeError:
+                        pass
+            
+            # If not JSON or parsing failed, return the response as-is
+            # but clean up any markdown formatting
+            cleaned = ai_response.replace('```json', '').replace('```', '').strip()
+            if cleaned.startswith('{') and cleaned.endswith('}'):
+                # It's still JSON, try to extract message
+                try:
+                    response_data = json.loads(cleaned)
+                    plan = response_data.get("plan", [])
+                    if plan and len(plan) > 0:
+                        first_step = plan[0]
+                        args = first_step.get("args", {})
+                        message = args.get("message", "")
+                        if message:
+                            return message
+                except json.JSONDecodeError:
+                    pass
+            
+            return cleaned
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting natural message: {e}")
+            return ai_response
 
     def shutdown(self):
         """Shutdown the AI system and clean up resources."""
