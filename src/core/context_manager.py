@@ -416,6 +416,10 @@ class AdvancedContextManager:
             related_entries=related_entries or []
         )
         
+        # Debug: Check if enums are still correct after creation
+        self.logger.debug(f"Created entry - context_type: {entry.context_type} (type: {type(entry.context_type)})")
+        self.logger.debug(f"Created entry - priority: {entry.priority} (type: {type(entry.priority)})")
+        
         # Add to session
         self.current_session.context_entries.append(entry)
         self.current_session.last_accessed = time.time()
@@ -565,9 +569,22 @@ class AdvancedContextManager:
     def _save_entry_to_db(self, entry: ContextEntry):
         """Save context entry to database."""
         try:
+            # Debug: Check what we're getting
+            self.logger.debug(f"Saving entry - context_type: {entry.context_type} (type: {type(entry.context_type)})")
+            self.logger.debug(f"Saving entry - priority: {entry.priority} (type: {type(entry.priority)})")
+            
             # Handle enum conversion safely
-            context_type_value = entry.context_type.value if hasattr(entry.context_type, 'value') else str(entry.context_type)
-            priority_value = entry.priority.value if hasattr(entry.priority, 'value') else str(entry.priority)
+            if isinstance(entry.context_type, ContextType):
+                context_type_value = entry.context_type.value
+            else:
+                context_type_value = str(entry.context_type)
+                
+            if isinstance(entry.priority, Priority):
+                priority_value = entry.priority.value
+            else:
+                priority_value = str(entry.priority)
+                
+            self.logger.debug(f"Converted - context_type_value: {context_type_value}, priority_value: {priority_value}")
             
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""

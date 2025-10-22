@@ -174,21 +174,12 @@ class GeminiClient:
                 top_k=kwargs.get('top_k', 40),
             )
             
-            # Enable Google Search if requested
-            if use_search:
-                # Use tools parameter to enable Google Search
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    safety_settings=self.safety_settings,
-                    tools=[{"google_search": {}}]
-                )
-            else:
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    safety_settings=self.safety_settings
-                )
+            # Generate response without tools for now (tools can be added later)
+            response = self.model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                safety_settings=self.safety_settings
+            )
             
             return response.text
 
@@ -202,7 +193,7 @@ class GeminiClient:
                 return await self._make_request(prompt, use_search, **kwargs)
             raise
     
-    async def generate_response(self, prompt: str, use_search: bool = True, **kwargs) -> str:
+    async def generate_response(self, prompt: str, use_search: bool = True, **kwargs) -> dict:
         """Generate a response using Gemini with optional Google Search."""
         try:
             response = await self._make_request(prompt, use_search, **kwargs)
@@ -224,11 +215,23 @@ class GeminiClient:
                 await self._summarize_context()
             
             self._save_context()
-            return response
+            
+            # Return in expected format
+            return {
+                "success": True,
+                "text": response,
+                "model": "gemini-pro",
+                "tokens_used": conversation["tokens"]
+            }
 
         except Exception as e:
             logger.error(f"Failed to generate response: {e}")
-            raise
+            return {
+                "success": False,
+                "text": f"Error: {e}",
+                "model": "gemini-pro",
+                "tokens_used": 0
+            }
     
     async def search_web(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """Search the web using Gemini's built-in Google Search."""

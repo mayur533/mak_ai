@@ -749,14 +749,18 @@ class AutonomousAISystem:
             if results:
                 formatted_results = []
                 for entry in results:
-                    timestamp = entry.get("timestamp", 0)
+                    timestamp = getattr(entry, 'timestamp', 0)
                     time_str = (
                         datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
                         if timestamp
                         else "Unknown"
                     )
+                    entry_type = getattr(entry, 'context_type', 'unknown')
+                    if hasattr(entry_type, 'value'):
+                        entry_type = entry_type.value
+                    content = getattr(entry, 'content', '')
                     formatted_results.append(
-                        f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}..."
+                        f"[{time_str}] {entry_type}: {content[:200]}..."
                     )
                 return {
                     "success": True,
@@ -778,14 +782,18 @@ class AutonomousAISystem:
             if results:
                 formatted_results = []
                 for entry in results:
-                    timestamp = entry.get("timestamp", 0)
+                    timestamp = getattr(entry, 'timestamp', 0)
                     time_str = (
                         datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
                         if timestamp
                         else "Unknown"
                     )
+                    entry_type = getattr(entry, 'context_type', 'unknown')
+                    if hasattr(entry_type, 'value'):
+                        entry_type = entry_type.value
+                    content = getattr(entry, 'content', '')
                     formatted_results.append(
-                        f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}..."
+                        f"[{time_str}] {entry_type}: {content[:200]}..."
                     )
                 return {
                     "success": True,
@@ -807,14 +815,18 @@ class AutonomousAISystem:
             if results:
                 formatted_results = []
                 for entry in results:
-                    timestamp = entry.get("timestamp", 0)
+                    timestamp = getattr(entry, 'timestamp', 0)
                     time_str = (
                         datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
                         if timestamp
                         else "Unknown"
                     )
+                    entry_type = getattr(entry, 'context_type', 'unknown')
+                    if hasattr(entry_type, 'value'):
+                        entry_type = entry_type.value
+                    content = getattr(entry, 'content', '')
                     formatted_results.append(
-                        f"[{time_str}] {entry.get('entry_type', 'unknown')}: {entry.get('content', '')[:200]}..."
+                        f"[{time_str}] {entry_type}: {content[:200]}..."
                     )
                 return {
                     "success": True,
@@ -1828,10 +1840,9 @@ Current Request:
 {prompt}
 """
 
-            # Use Gemini client with context caching
-            response = self.gemini_client.generate_with_context_caching(
-                enhanced_prompt, "main_conversation"
-            )
+            # Use Gemini client
+            import asyncio
+            response = asyncio.run(self.gemini_client.generate_response(enhanced_prompt))
 
             if response.get("success"):
                 # Add context entry
@@ -1865,9 +1876,11 @@ Current Request:
             if recent_context:
                 context_string += "**Recent Context (Last 20 entries):**\n"
                 for entry in recent_context:
-                    entry_type = entry.get("entry_type", "unknown")
-                    content = entry.get("content", "")
-                    timestamp = entry.get("timestamp", 0)
+                    entry_type = getattr(entry, 'context_type', 'unknown')
+                    if hasattr(entry_type, 'value'):
+                        entry_type = entry_type.value
+                    content = getattr(entry, 'content', "")
+                    timestamp = getattr(entry, 'timestamp', 0)
                     if timestamp:
                         dt = datetime.fromtimestamp(timestamp)
                         time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -2312,7 +2325,8 @@ Always return a valid JSON object.
             self.context["conversation_history"].append({"user": user_input, "ai": ""})
 
             # Add to context manager
-            self.context_manager.add_context_entry("user_request", user_input)
+            from src.core.context_manager import ContextType, Priority
+            self.context_manager.add_context_entry(ContextType.USER_INPUT, user_input, Priority.NORMAL)
 
             # Reset execution history for new task
             self.context["execution_history"].clear()
@@ -3020,10 +3034,12 @@ Always return a valid JSON object.
                     f"\nError: {result.get('error', 'Unknown error')}"
                 )
 
+            from src.core.context_manager import ContextType, Priority
             self.context_manager.add_context_entry(
-                "tool_execution",
+                ContextType.TOOL_EXECUTION,
                 tool_execution_content,
-                {
+                Priority.NORMAL,
+                metadata={
                     "action": action,
                     "args": args,
                     "success": result.get("success", False),
@@ -3264,8 +3280,8 @@ Always return a valid JSON object.
         self.logger.info("Shutting down AI system...")
         self.active = False
 
-        # Stop health server
-        if self.health_server:
+        # Stop health server if it exists
+        if hasattr(self, 'health_server') and self.health_server:
             self.health_server.stop()
             self.logger.info("Health server stopped")
         
