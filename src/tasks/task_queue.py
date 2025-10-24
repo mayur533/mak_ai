@@ -256,14 +256,14 @@ class SimpleTaskQueue:
             task.task_id,
             task.name,
             task.func_name,
-            json.dumps(task.args),
-            json.dumps(task.kwargs),
+            json.dumps(task.args, default=str),
+            json.dumps(task.kwargs, default=str),
             task.status.value,
             task.priority.value,
             task.created_at,
             task.started_at,
             task.completed_at,
-            json.dumps(task.result) if task.result else None,
+            json.dumps(task.result, default=str) if task.result else None,
             task.error,
             task.retry_count,
             task.max_retries,
@@ -560,6 +560,7 @@ def shutdown_task_queue():
     if _global_task_queue:
         _global_task_queue.stop()
         _global_task_queue = None
+
 
 
 

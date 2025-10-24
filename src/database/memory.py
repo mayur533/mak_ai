@@ -228,7 +228,7 @@ class MemoryManager:
             INSERT INTO memory (id, content, timestamp, metadata)
             VALUES (?, ?, ?, ?)
         """,
-            (item.id, item.content, item.timestamp, json.dumps(item.metadata)),
+            (item.id, item.content, item.timestamp, json.dumps(item.metadata, default=str)),
         )
         self.db.commit()
 
@@ -359,9 +359,9 @@ class ToolManager:
                 (
                     name,
                     metadata.get("category", "general"),
-                    json.dumps(metadata.get("parameters", [])),
-                    json.dumps(metadata.get("examples", [])),
-                    json.dumps(metadata.get("result_formats", {})),
+                    json.dumps(metadata.get("parameters", []), default=str),
+                    json.dumps(metadata.get("examples", []), default=str),
+                    json.dumps(metadata.get("result_formats", {}), default=str),
                     metadata.get("usage_count", 0),
                     metadata.get("registered_at", time.time()),
                     time.time()

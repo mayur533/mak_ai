@@ -1972,7 +1972,7 @@ Current Request:
 - Args: {last_error.get('args', {})}
 """
 
-        system_info = json.dumps(self.context["system_info"], indent=2)
+        system_info = json.dumps(self.context["system_info"], indent=2, default=str)
         initial_goal_text = (
             f"The user's original goal was: {self.context['initial_goal']}\n"
             if self.context.get("initial_goal")
@@ -2869,7 +2869,7 @@ Always return a valid JSON object.
             }
 
             # Check for repeated failed steps
-            step_identifier = json.dumps(step_data, sort_keys=True)
+            step_identifier = json.dumps(step_data, sort_keys=True, default=str)
             if self.execution_history.has_failed_before(step_identifier):
                 self.logger.error(
                     "This step has previously failed. Skipping to avoid loops."
@@ -2902,7 +2902,7 @@ Always return a valid JSON object.
                     self.logger.debug(
                         f"🔧 Executing tool: {action} (attempt {attempt + 1}/{max_retries})"
                     )
-                    self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2)}")
+                    self.logger.debug(f"📋 Arguments: {json.dumps(args, indent=2, default=str)}")
 
                     # Validate tool function exists
                     if not hasattr(tool, "func") or not callable(tool.func):
@@ -3037,7 +3037,7 @@ Always return a valid JSON object.
 
             # Add tool execution to context manager
             tool_execution_content = (
-                f"Executed '{action}' with args: {json.dumps(args, indent=2)}"
+                f"Executed '{action}' with args: {json.dumps(args, indent=2, default=str)}"
             )
             if result.get("success"):
                 tool_execution_content += f"\nResult: {output_text[:500]}{'...' if len(output_text) > 500 else ''}"
@@ -3134,7 +3134,7 @@ Always return a valid JSON object.
 
                 # Add error to context manager
                 from src.core.context_manager import ContextType, Priority
-                error_content = f"Tool '{action}' failed with args: {json.dumps(args, indent=2)}\nError: {error_msg}"
+                error_content = f"Tool '{action}' failed with args: {json.dumps(args, indent=2, default=str)}\nError: {error_msg}"
                 self.context_manager.add_context_entry(
                     ContextType.ERROR,
                     error_content,

@@ -118,10 +118,23 @@ class GeminiClient:
     def _save_context(self):
         """Save context to file."""
         try:
+            # Ensure all data is JSON-serializable
+            serializable_context = self._make_serializable(self.context)
             with open(self.context_file, 'w', encoding='utf-8') as f:
-                json.dump(self.context, f, indent=2, ensure_ascii=False, default=str)
+                json.dump(serializable_context, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Failed to save context: {e}")
+    
+    def _make_serializable(self, obj):
+        """Recursively convert objects to JSON-serializable format."""
+        if isinstance(obj, dict):
+            return {key: self._make_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(item) for item in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            return str(obj)
     
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text."""
@@ -147,7 +160,21 @@ class GeminiClient:
         
         # Safely serialize conversations, handling any unhashable types
         try:
-            conversations_json = json.dumps(conversations, indent=2, default=str)
+            # Convert all data to JSON-serializable format
+            serializable_conversations = []
+            for conv in conversations:
+                if isinstance(conv, dict):
+                    serializable_conv = {}
+                    for key, value in conv.items():
+                        if isinstance(value, (str, int, float, bool, type(None))):
+                            serializable_conv[key] = value
+                        else:
+                            serializable_conv[key] = str(value)
+                    serializable_conversations.append(serializable_conv)
+                else:
+                    serializable_conversations.append(str(conv))
+            
+            conversations_json = json.dumps(serializable_conversations, indent=2, ensure_ascii=False)
         except (TypeError, ValueError) as e:
             logger.warning(f"Failed to serialize conversations: {e}")
             # Fallback to string representation
