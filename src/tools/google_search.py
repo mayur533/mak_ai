@@ -55,17 +55,17 @@ class GoogleSearchTool:
         try:
             self.logger.info(f"Searching Google for: {query}")
 
-            # Use official Gemini API Google Search tool
+            # Use official Gemini API with Google Search grounding
             headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": query}]}],
-                "tools": [{"google_search": {}}],
                 "generationConfig": {
                     "temperature": 0.7,
                     "maxOutputTokens": 2048,
                     "topP": 0.95,
                     "topK": 40,
                 },
+                "tools": [{"google_search": {}}],
             }
             params = {"key": self.search_api_key}
 
@@ -84,7 +84,7 @@ class GoogleSearchTool:
                 candidate = data["candidates"][0]
                 search_result = candidate["content"]["parts"][0]["text"]
 
-                # Extract grounding metadata if available
+                # Extract grounding metadata for proper search results
                 grounding_metadata = candidate.get("groundingMetadata", {})
                 web_search_queries = grounding_metadata.get("webSearchQueries", [])
                 grounding_chunks = grounding_metadata.get("groundingChunks", [])
