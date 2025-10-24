@@ -271,7 +271,8 @@ class AutonomousAISystem:
             # Get the latest message
             messages = state["messages"]
             if not messages:
-                return {"messages": [AIMessage(content="Hello! How can I help you today?")]}
+                # Let the AI generate its own response instead of hardcoded
+                return {"messages": []}
             
             # Use the LLM to generate response
             response = self.llm.invoke(messages)
@@ -991,7 +992,7 @@ class AutonomousAISystem:
                 code="",
                 doc="Analyze an image using Gemini Vision. Usage: analyze_image(image_path, prompt='Describe this image')",
                 is_dynamic=False,
-                func=self.gemini_client.analyze_image,
+                func=self.gemini_client.analyze_image_sync,
             ),
             Tool(
                 name="read_screen",
@@ -1115,16 +1116,16 @@ class AutonomousAISystem:
             Tool(
                 name="generate_structured_output",
                 code="",
-                doc="Generate structured output using JSON schema. Usage: generate_structured_output(prompt, schema)",
+                doc="Generate structured output using JSON schema. Usage: generate_structured_output(prompt, output_format='json')",
                 is_dynamic=False,
-                func=self.gemini_client.generate_structured_output,
+                func=self.gemini_client.generate_structured_output_sync,
             ),
             Tool(
                 name="create_session",
                 code="",
-                doc="Create a new conversation session. Usage: create_session(session_id=None)",
+                doc="Create a new conversation session. Usage: create_session(session_name='default')",
                 is_dynamic=False,
-                func=self.gemini_client.create_session,
+                func=self.gemini_client.create_session_sync,
             ),
             # Enhanced file and directory tools
             Tool(
@@ -1215,16 +1216,16 @@ class AutonomousAISystem:
             Tool(
                 name="enhanced_web_search",
                 code="",
-                doc="Perform web search with adaptive result length based on query complexity. Usage: enhanced_web_search(query, adaptive=True)",
+                doc="Perform web search with adaptive result length based on query complexity. Usage: enhanced_web_search(query, max_results=5)",
                 is_dynamic=False,
-                func=self.gemini_client.enhanced_web_search,
+                func=self.gemini_client.enhanced_web_search_sync,
             ),
             Tool(
                 name="analyze_urls",
                 code="",
                 doc="Analyze multiple URLs and extract information. Usage: analyze_urls(urls)",
                 is_dynamic=False,
-                func=self.gemini_client.analyze_urls,
+                func=self.gemini_client.analyze_urls_sync,
             ),
             # Additional file and system management tools
             Tool(
@@ -1984,34 +1985,40 @@ Current Request:
         prompt_template = f"""
 # 🤖 **ADVANCED AUTONOMOUS AI ASSISTANT SYSTEM** 🤖
 
-You are a **state-of-the-art, production-ready AI Assistant** with comprehensive capabilities, advanced tool integration, and intelligent autonomous operation. This system represents the pinnacle of AI automation technology.
+You are a highly intelligent, autonomous, and self-improving AI system. Your primary objective is to complete the user's request. You have full access to the system and a comprehensive set of tools to achieve any task.
 
-## 🚀 **ADVANCED CAPABILITIES OVERVIEW:**
+## 🚀 **CORE PROCESS:**
+1. **Analyze**: Carefully break down the user's request.
+2. **Recall & Contextualize**: Use your long-term memory and recent conversation history to retrieve relevant context.
+3. **Plan**: Create a detailed, step-by-step plan. Each step must be a single tool call.
+4. **Execute**: Execute the plan, one step at a time.
+5. **Reflect & Improve**: Analyze the output of each tool. If an error occurs, self-heal by creating a new plan to diagnose and fix the issue. Learn from every success and failure to improve future performance.
 
-### **🧠 Core Intelligence:**
+## 🎯 **GUIDING PRINCIPLES:**
+- **PREFER TERMINAL COMMANDS**: For system operations like brightness, volume, network, etc., use `run_shell` with appropriate terminal commands
+- **AUTONOMOUS OPERATION**: You have the power to create new tools using `create_and_save_tool`
+- **VERIFICATION**: After creating a new tool, your **NEXT** step MUST be to use `run_python` with a test case to **verify** the new tool's functionality
+- **SELF-HEALING**: Use `run_shell` to execute system commands, `run_python` to execute Python code
+- **PACKAGE MANAGEMENT**: Use `install_package` to install any necessary libraries
+- **FILE OPERATIONS**: Use `read_file` and `write_file` to interact with the file system
+- **EXPLORATION**: Use `list_dir` to explore the file system
+- **COMPLETION**: When the entire task is complete, you MUST use the `complete_task` tool with a summary message
+- **CRITICAL**: Do not repeat a failed step. If a step fails, your next plan must be to diagnose the failure based on the error output and propose a new, different approach
+
+## 🛠️ **SYSTEM OPERATIONS PREFERENCE:**
+- **Brightness Control**: Use `run_shell("xrandr --output <display> --brightness 0.5")` or `run_shell("brightnessctl set 50%")`
+- **Volume Control**: Use `run_shell("pactl set-sink-volume @DEFAULT_SINK@ 50%")` or `run_shell("amixer set Master 50%")`
+- **Network Operations**: Use `run_shell("ip addr show")`, `run_shell("ping google.com")`, etc.
+- **System Information**: Use `run_shell("uname -a")`, `run_shell("lsb_release -a")`, etc.
+- **Process Management**: Use `run_shell("ps aux")`, `run_shell("kill <pid>")`, etc.
+- **File Operations**: Use `run_shell("ls -la")`, `run_shell("cp source dest")`, etc.
+
+## 🧠 **INTELLIGENCE FEATURES:**
 - **Advanced Reasoning**: Multi-step logical reasoning with ReAct pattern
 - **Self-Healing**: Automatic error detection, analysis, and recovery
 - **Adaptive Learning**: Continuous improvement from interactions and feedback
 - **Context Awareness**: Deep understanding of conversation history and system state
 - **Multi-Modal Processing**: Text, images, files, system interactions, and more
-
-### **🛠️ Comprehensive Tool Arsenal ({len(self.tool_manager.tools)} Tools Available):**
-- **File Operations**: Complete file system management (create, read, write, copy, move, delete, search)
-- **System Control**: Process management, system monitoring, package installation
-- **GUI Automation**: Mouse control, keyboard input, screen interaction, window management
-- **Web Integration**: Search, analysis, URL processing, content extraction
-- **Development Tools**: Code analysis, linting, project creation, dependency management
-- **Data Processing**: JSON, CSV, archive handling, structured data manipulation
-- **Context Management**: Advanced session management, memory, analytics, optimization
-
-### **🎯 Core Principles:**
-- **DYNAMIC**: Never hardcode paths - always explore and discover what exists
-- **ADAPTIVE**: Work with whatever you find, don't assume anything exists
-- **SELF-HEALING**: Automatically resolve issues and learn from failures
-- **EFFICIENT**: Use the most appropriate approach for each task
-- **LEARNING**: Continuously improve based on experience
-- **TOOL-AGNOSTIC**: Use any available tool as needed
-- **PRODUCTION-READY**: Enterprise-grade reliability and performance
 
 **File and Directory Creation Rules:**
 {self._get_system_rules()}
@@ -2107,8 +2114,8 @@ When creating plans, assign specific agents to each step:
 - **get_directory_size(path)**: Calculate directory size and statistics
 - **find_large_files(directory, min_size)**: Identify large files for cleanup
 
-### **💻 System Control & Management:**
-- **run_shell(command, timeout)**: Execute shell commands with timeout control
+### **💻 System Control & Management (PREFERRED FOR SYSTEM OPERATIONS):**
+- **run_shell(command, timeout)**: Execute shell commands with timeout control - **USE THIS FOR BRIGHTNESS, VOLUME, NETWORK, ETC.**
 - **run_shell_async(command, timeout)**: Run commands in background
 - **get_system_info()**: Get comprehensive system information
 - **get_process_info()**: List and monitor running processes
@@ -2117,6 +2124,13 @@ When creating plans, assign specific agents to each step:
 - **install_system_package(package)**: Install system packages
 - **check_system_dependency(dependency)**: Verify system dependencies
 - **run_linter(file_path)**: Run code linting and analysis
+
+**TERMINAL COMMAND EXAMPLES:**
+- Brightness: `run_shell("brightnessctl set 50%")` or `run_shell("xrandr --output <display> --brightness 0.5")`
+- Volume: `run_shell("pactl set-sink-volume @DEFAULT_SINK@ 50%")` or `run_shell("amixer set Master 50%")`
+- Network: `run_shell("ip addr show")`, `run_shell("ping google.com")`
+- System: `run_shell("uname -a")`, `run_shell("lsb_release -a")`
+- Processes: `run_shell("ps aux")`, `run_shell("kill <pid>")`
 
 ### **🖱️ GUI Automation & Interaction:**
 - **get_mouse_position()**: Get current mouse coordinates
@@ -2244,14 +2258,23 @@ When creating plans, assign specific agents to each step:
 
 **CRITICAL REQUIREMENTS:**
 1. **MUST use agent assignments**: Every step must start with "AGENT_NAME: description"
-2. **MUST be efficient**: No repetitive commands or unnecessary steps
-3. **MUST complete tasks**: Use complete_task tool when finished
-4. **MUST be dynamic**: Adapt to what you find, don't assume anything exists
-5. **MUST prevent infinite loops**: Only avoid truly repetitive patterns (same command 3+ times in a row)
-6. **MUST show results**: Display actual content from searches, file reads, and analysis
-7. **MUST handle multi-step tasks**: If task has "and", "then", or multiple actions, execute ALL steps
-8. **MUST handle complex projects**: For project creation, create all necessary files and directories systematically
-9. **MUST use proper project structure**: Organize files in logical directories (templates/, static/, models/, etc.)
+2. **MUST prefer terminal commands**: For system operations (brightness, volume, network, etc.), use `run_shell` instead of GUI automation
+3. **MUST be efficient**: No repetitive commands or unnecessary steps
+4. **MUST complete tasks**: Use complete_task tool when finished
+5. **MUST be dynamic**: Adapt to what you find, don't assume anything exists
+6. **MUST prevent infinite loops**: Only avoid truly repetitive patterns (same command 3+ times in a row)
+7. **MUST show results**: Display actual content from searches, file reads, and analysis
+8. **MUST handle multi-step tasks**: If task has "and", "then", or multiple actions, execute ALL steps
+9. **MUST handle complex projects**: For project creation, create all necessary files and directories systematically
+10. **MUST use proper project structure**: Organize files in logical directories (templates/, static/, models/, etc.)
+
+**SYSTEM OPERATION PRIORITY:**
+- **BRIGHTNESS**: Use `run_shell("brightnessctl set 50%")` or `run_shell("xrandr --output <display> --brightness 0.5")`
+- **VOLUME**: Use `run_shell("pactl set-sink-volume @DEFAULT_SINK@ 50%")` or `run_shell("amixer set Master 50%")`
+- **NETWORK**: Use `run_shell("ip addr show")`, `run_shell("ping google.com")`
+- **SYSTEM INFO**: Use `run_shell("uname -a")`, `run_shell("lsb_release -a")`
+- **PROCESSES**: Use `run_shell("ps aux")`, `run_shell("kill <pid>")`
+- **FILES**: Use `run_shell("ls -la")`, `run_shell("cp source dest")`
 
 **Example proper format:**
 ```json
@@ -2669,7 +2692,7 @@ Always return a valid JSON object.
             if "duration" in result:
                 print(f"⏱️  Duration: {result['duration']:.2f} seconds")
         else:
-            print(f"❌ Task failed: {result.get('error', 'Unknown error')}")
+            print(f"Task failed: {result.get('error', 'Unknown error')}")
 
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
         """Parse AI response and extract plan with comprehensive validation."""
@@ -3194,8 +3217,9 @@ Always return a valid JSON object.
         try:
             self.logger.info("Autonomous AI System started")
             if self.voice_mode:
+                # Let the AI generate its own greeting instead of hardcoded
                 self.voice_tools.speak(
-                    "Hello, I am an autonomous AI system with self-healing capabilities. How can I help you today?"
+                    "I am an autonomous AI system with self-healing capabilities. Ready to assist."
                 )
             else:
                 print("🤖 Autonomous AI System Started")
@@ -3219,9 +3243,9 @@ Always return a valid JSON object.
 
                     if user_input.lower() in ["exit", "quit", "stop", "goodbye"]:
                         if self.voice_mode:
-                            self.voice_tools.speak("Goodbye!")
+                            self.voice_tools.speak("Session ended.")
                         else:
-                            print("👋 Goodbye!")
+                            print("👋 Session ended.")
                         self.active = False
                         continue
 
@@ -3236,26 +3260,26 @@ Always return a valid JSON object.
                     
                 except KeyboardInterrupt:
                     if self.voice_mode:
-                        self.voice_tools.speak("Goodbye!")
+                        self.voice_tools.speak("Session ended.")
                     else:
-                        print("\n👋 Goodbye!")
+                        print("\n👋 Session ended.")
                     self.active = False
                     break
                 except Exception as e:
                     self.logger.error(f"Error in main loop: {e}")
                     if not self.voice_mode:
-                        print(f"❌ Error: {e}")
+                        print(f"System error: {e}")
                         
         except KeyboardInterrupt:
             if self.voice_mode:
-                self.voice_tools.speak("Goodbye!")
+                self.voice_tools.speak("Session ended.")
             else:
-                print("\n👋 Goodbye!")
+                print("\n👋 Session ended.")
             self.active = False
         except Exception as e:
             self.logger.error(f"Unexpected error in main loop: {e}")
             if not self.voice_mode:
-                print(f"❌ Error: {e}")
+                print(f"System error: {e}")
         finally:
             self.shutdown()
 
@@ -3326,7 +3350,7 @@ Always return a valid JSON object.
                     
         except Exception as e:
             self.logger.error(f"Error displaying clean response: {e}")
-            print(f"\n❌ Error displaying response: {e}")
+            print(f"\nDisplay error: {e}")
 
     def _get_natural_action_description(self, action: str, args: dict) -> str:
         """Convert tool action to natural language description."""
@@ -3399,68 +3423,17 @@ Always return a valid JSON object.
         if not output or len(output.strip()) == 0:
             return
             
-        # Format output based on action type
-        if action == "list_dir":
-            print("📁 Here's what I found:")
-            lines = output.split('\n')
-            for line in lines[:15]:  # Limit to first 15 lines
-                if line.strip():
-                    print(f"   {line}")
-            if len(lines) > 15:
-                print(f"   ... and {len(lines) - 15} more items")
-        
-        elif action == "google_search":
-            print("🌐 Here are the search results:")
-            lines = output.split('\n')
-            for line in lines[:8]:  # Limit to first 8 lines
-                if line.strip():
-                    print(f"   {line}")
-            if len(lines) > 8:
-                print(f"   ... and {len(lines) - 8} more results")
-        
-        elif action == "get_system_info":
-            print("💻 System details:")
-            for line in output.split('\n'):
-                if line.strip():
-                    print(f"   {line}")
-        
-        elif action == "read_file":
-            print("📄 File contents:")
-            lines = output.split('\n')
-            for line in lines[:10]:  # Limit to first 10 lines
-                if line.strip():
-                    print(f"   {line}")
-            if len(lines) > 10:
-                print(f"   ... and {len(lines) - 10} more lines")
-        
-        elif action == "run_shell":
-            print("💻 Command output:")
-            lines = output.split('\n')
-            for line in lines[:10]:  # Limit to first 10 lines
-                if line.strip():
-                    print(f"   {line}")
-            if len(lines) > 10:
-                print(f"   ... and {len(lines) - 10} more lines")
-        
-        else:
-            # Generic output display
-            lines = output.split('\n')
-            for line in lines[:8]:  # Limit to first 8 lines
-                if line.strip():
-                    print(f"   {line}")
-            if len(lines) > 8:
-                print(f"   ... and {len(lines) - 8} more lines")
+        # Display output dynamically without hardcoded messages
+        lines = output.split('\n')
+        for line in lines[:10]:  # Limit to first 10 lines
+            if line.strip():
+                print(f"   {line}")
+        if len(lines) > 10:
+            print(f"   ... and {len(lines) - 10} more lines")
 
     def _get_tool_commentary(self, action: str, output: str) -> str:
         """Generate natural commentary between tool executions."""
-        if action == "list_dir" and "not found" in output.lower():
-            return "The directory wasn't found, let me try a different approach..."
-        elif action == "google_search" and len(output.split('\n')) > 5:
-            return "Found some good results! Let me process this information..."
-        elif action == "read_file" and len(output) > 100:
-            return "That's a substantial file. Let me analyze its contents..."
-        elif action == "run_shell" and "error" in output.lower():
-            return "There was an issue with that command. Let me try something else..."
+        # Let the AI generate its own commentary instead of hardcoded responses
         return ""
 
     def _extract_natural_message(self, ai_response: str) -> str:

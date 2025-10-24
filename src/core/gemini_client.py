@@ -520,6 +520,51 @@ class GeminiClient:
             logger.error(f"Enhanced web search failed: {e}")
             return {"success": False, "error": str(e)}
     
+    def enhanced_web_search_sync(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        """Synchronous wrapper for enhanced web search."""
+        import asyncio
+        try:
+            return asyncio.run(self.enhanced_web_search(query, max_results))
+        except Exception as e:
+            logger.error(f"Enhanced web search sync failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def analyze_image_sync(self, image_path: str, prompt: str = "Describe this image") -> Dict[str, Any]:
+        """Synchronous wrapper for analyze image."""
+        import asyncio
+        try:
+            return asyncio.run(self.analyze_image(image_path, prompt))
+        except Exception as e:
+            logger.error(f"Analyze image sync failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def generate_structured_output_sync(self, prompt: str, output_format: str = "json") -> Dict[str, Any]:
+        """Synchronous wrapper for generate structured output."""
+        import asyncio
+        try:
+            return asyncio.run(self.generate_structured_output(prompt, output_format))
+        except Exception as e:
+            logger.error(f"Generate structured output sync failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def create_session_sync(self, session_name: str = "default") -> Dict[str, Any]:
+        """Synchronous wrapper for create session."""
+        import asyncio
+        try:
+            return asyncio.run(self.create_session(session_name))
+        except Exception as e:
+            logger.error(f"Create session sync failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def analyze_urls_sync(self, urls: list) -> Dict[str, Any]:
+        """Synchronous wrapper for analyze URLs."""
+        import asyncio
+        try:
+            return asyncio.run(self.analyze_urls(urls))
+        except Exception as e:
+            logger.error(f"Analyze URLs sync failed: {e}")
+            return {"success": False, "error": str(e)}
+    
     async def analyze_urls(self, urls: list) -> Dict[str, Any]:
         """Analyze multiple URLs and extract information."""
         try:
