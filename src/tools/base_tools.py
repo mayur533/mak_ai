@@ -1047,11 +1047,12 @@ class BaseTools:
 
             # Update context manager with new directory
             if hasattr(self.system, "context_manager"):
-                from src.core.context_manager import ContextType, Priority
+                from src.core.context_manager import ContextType, Priority, ContextRelevance
                 self.system.context_manager.add_context_entry(
                     ContextType.SYSTEM_EVENT,
                     f"Changed directory to: {path}",
                     Priority.NORMAL,
+                    ContextRelevance.CONTEXTUAL,
                     metadata={"new_directory": str(path)},
                 )
 

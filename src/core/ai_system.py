@@ -1847,10 +1847,12 @@ Current Request:
             if response.get("success"):
                 # Add context entry
                 from src.core.context_manager import ContextType, Priority
+                from src.core.context_manager import ContextRelevance
                 self.context_manager.add_context_entry(
                     ContextType.AI_RESPONSE,
                     response["text"],
                     Priority.NORMAL,
+                    ContextRelevance.RELEVANT,
                     {"usage": response.get("usage", {})},
                 )
                 return response["text"]
@@ -2333,7 +2335,8 @@ Always return a valid JSON object.
 
             # Add to context manager
             from src.core.context_manager import ContextType, Priority
-            self.context_manager.add_context_entry(ContextType.USER_INPUT, user_input, Priority.NORMAL)
+            from src.core.context_manager import ContextRelevance
+            self.context_manager.add_context_entry(ContextType.USER_INPUT, user_input, Priority.NORMAL, ContextRelevance.RELEVANT)
 
             # Reset execution history for new task
             self.context["execution_history"].clear()
@@ -3046,11 +3049,12 @@ Always return a valid JSON object.
                     f"\nError: {result.get('error', 'Unknown error')}"
                 )
 
-            from src.core.context_manager import ContextType, Priority
+            from src.core.context_manager import ContextType, Priority, ContextRelevance
             self.context_manager.add_context_entry(
                 ContextType.TOOL_EXECUTION,
                 tool_execution_content,
                 Priority.NORMAL,
+                ContextRelevance.RELEVANT,
                 metadata={
                     "action": action,
                     "args": args,
@@ -3133,12 +3137,13 @@ Always return a valid JSON object.
                 }
 
                 # Add error to context manager
-                from src.core.context_manager import ContextType, Priority
+                from src.core.context_manager import ContextType, Priority, ContextRelevance
                 error_content = f"Tool '{action}' failed with args: {json.dumps(args, indent=2, default=str)}\nError: {error_msg}"
                 self.context_manager.add_context_entry(
                     ContextType.ERROR,
                     error_content,
                     Priority.HIGH,
+                    ContextRelevance.IMPORTANT,
                     metadata={"action": action, "args": args, "error": error_msg},
                 )
 

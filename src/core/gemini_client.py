@@ -106,8 +106,11 @@ class GeminiClient:
         """Load context from file."""
         try:
             with open(self.context_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+                context = json.load(f)
+                # Ensure all data is serializable
+                return self._make_serializable(context)
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to load context: {e}. Creating new context.")
             return {
                 "conversations": [],
                 "summaries": [],
@@ -570,6 +573,37 @@ class GeminiClient:
         }
         self._save_context()
         logger.info("Context cleared")
+    
+    def cleanup_context(self):
+        """Clean up context by removing old conversations and summaries."""
+        try:
+            # Keep only last 5 conversations
+            if len(self.context["conversations"]) > 5:
+                self.context["conversations"] = self.context["conversations"][-5:]
+            
+            # Keep only last 3 summaries
+            if len(self.context["summaries"]) > 3:
+                self.context["summaries"] = self.context["summaries"][-3:]
+            
+            # Recalculate tokens
+            self.context["current_tokens"] = self._count_tokens(
+                json.dumps(self.context["conversations"], default=str)
+            )
+            self.context["last_updated"] = datetime.now().isoformat()
+            
+            self._save_context()
+            logger.info("Context cleaned up successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to cleanup context: {e}")
+            # If cleanup fails, clear everything
+            self.context = {
+                "conversations": [],
+                "summaries": [],
+                "current_tokens": 0,
+                "last_updated": datetime.now().isoformat()
+            }
+            self._save_context()
 
 # Global client instance
 _gemini_client: Optional[GeminiClient] = None
